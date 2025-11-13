@@ -51,3 +51,14 @@ Add this to your `appsettings.json` (replace placeholder values with real creden
     "LogStreamPrefix": "api"
   }
 }
+
+
+
+<img width="1786" height="977" alt="image" src="https://github.com/user-attachments/assets/0cc5b2e0-fa9d-4a0c-b83a-1856e0ce5ae9" />
+
+<img width="1543" height="647" alt="image" src="https://github.com/user-attachments/assets/069e1304-9308-40c7-b565-6756f08d1081" />
+
+<img width="1479" height="850" alt="image" src="https://github.com/user-attachments/assets/170b1894-1dd1-47b0-afb6-eb1d4de36b53" />
+
+
+
