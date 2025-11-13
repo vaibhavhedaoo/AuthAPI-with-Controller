@@ -53,6 +53,13 @@ Add this to your `appsettings.json` (replace placeholder values with real creden
 }
 
 
+when you done with project setup you need to add migration
+
+dotnet ef migrations add InitialMigrations
+dotnet ef database update   
+
+follow here :  https://medium.com/aeturnuminc/building-authentication-service-using-microsoft-asp-net-core-identity-and-net-8-3fea53cfe0f8
+
 
 <img width="1786" height="977" alt="image" src="https://github.com/user-attachments/assets/0cc5b2e0-fa9d-4a0c-b83a-1856e0ce5ae9" />
 
