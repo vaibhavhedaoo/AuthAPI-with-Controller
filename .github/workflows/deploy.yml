@@ -46,9 +46,16 @@ jobs:
           echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
 
-      # Step 8: Ensure S3 bucket exists (with lowercase bucket name)
+      # Step 8: Ensure S3 bucket exists (with lowercase bucket + secret validation)
       - name: Ensure S3 bucket exists
         run: |
+          # Validate AWS_ACCOUNT_ID
+          if [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
+            echo "❌ ERROR: AWS_ACCOUNT_ID secret is missing!"
+            echo "Go to: GitHub Repo → Settings → Secrets → Actions → Add AWS_ACCOUNT_ID"
+            exit 1
+          fi
+
           APP_NAME="Sample-AUTH-API"
           APP_NAME_LOWER=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
           BUCKET_NAME="${APP_NAME_LOWER}-${{ secrets.AWS_ACCOUNT_ID }}"
@@ -83,14 +90,13 @@ jobs:
             echo "EB Application already exists: $APP_NAME"
           fi
 
-      # Step 11: Create or Update Elastic Beanstalk environment
+      # Step 11: Create or Update Elastic Beanstalk Environment
       - name: Create/Update EB environment
         run: |
           APP_NAME="Sample-AUTH-API"
           ENV_NAME="development"
           SOLUTION_STACK="64bit Amazon Linux 2 v5.15.7 running .NET 6"
 
-          # Check if environment exists
           ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
             --application-name "$APP_NAME" \
             --environment-names "$ENV_NAME" \
