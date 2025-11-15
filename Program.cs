@@ -1,19 +1,24 @@
-﻿using AuthAPIwithController.Models;
+﻿using Amazon;
+using Amazon.CloudWatchLogs;
+using Amazon.Runtime;
+using AuthAPIwithController.Models;
 using AuthService.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Serilog;
-using Serilog.Sinks.MSSqlServer;
 using Serilog.Sinks.AwsCloudWatch;
-using Amazon.CloudWatchLogs;
-using Amazon;
-using Amazon.Extensions.NETCore.Setup;
+using Serilog.Sinks.MSSqlServer;
 using System.Text;
 
 // ---------- Build app ----------
 var builder = WebApplication.CreateBuilder(args);
+
+// ---------- Read AWS settings ----------
+var awsAccessKey = builder.Configuration["AWS:AccessKey"];
+var awsSecretKey = builder.Configuration["AWS:SecretKey"];
+var awsRegion = builder.Configuration["AWS:Region"];
 
 // ---------- Configure Serilog ----------
 var writeTo = builder.Configuration["Logging:WriteTo"];
@@ -26,7 +31,11 @@ switch (writeTo)
         loggerConfig.WriteTo.Console();
         break;
     case "File":
-        loggerConfig.WriteTo.File("logs/app_log_.txt", rollingInterval: RollingInterval.Day);
+        loggerConfig.WriteTo.File(
+            "logs/app_log_.txt",
+            rollingInterval: RollingInterval.Day,
+            restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information
+        );
         break;
     case "Database":
         var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
@@ -36,28 +45,77 @@ switch (writeTo)
             {
                 TableName = "Logs",
                 AutoCreateSqlTable = true
-            });
+            },
+            restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information
+        );
         break;
     case "CloudWatch":
-        var awsOptions = builder.Configuration.GetAWSOptions();
-        var client = awsOptions.CreateServiceClient<IAmazonCloudWatchLogs>();
-        loggerConfig.WriteTo.AmazonCloudWatch(
-            logGroup: "AuthAPI-Logs",
-            logStreamPrefix: "api",
-            cloudWatchClient: client);
+        // Create AWS credentials
+        var credentials = new BasicAWSCredentials(awsAccessKey, awsSecretKey);
+
+        // Create CloudWatch client
+        var client = new AmazonCloudWatchLogsClient(
+            credentials,
+            RegionEndpoint.GetBySystemName(awsRegion)
+        );
+
+        // CloudWatch sink options
+        var cloudWatchOptions = new CloudWatchSinkOptions
+        {
+            LogGroupName = "AuthAPI-Logs",
+            LogStreamNameProvider = new DefaultLogStreamProvider(),
+            MinimumLogEventLevel = Serilog.Events.LogEventLevel.Information,
+            CreateLogGroup = true
+        };
+
+        loggerConfig.WriteTo.AmazonCloudWatch(cloudWatchOptions, client);
         break;
     default:
         loggerConfig.WriteTo.Console();
         break;
 }
 
+// Set Serilog as the logging provider
 Log.Logger = loggerConfig.CreateLogger();
 builder.Host.UseSerilog();
 
 // ---------- Add Services ----------
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
+    {
+        Title = "My API",
+        Version = "v1"
+    });
+
+    // JWT Authentication in Swagger
+    c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+        Scheme = "Bearer",
+        BearerFormat = "JWT",
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Description = "Enter your JWT token as: Bearer <token>"
+    });
+
+    c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            new string[] {}
+        }
+    });
+});
 
 // ---------- Database ----------
 builder.Services.AddDbContext<AppDBContext>(options =>
@@ -100,11 +158,9 @@ builder.Services.AddScoped<IEmailService, EmailService>();
 // ---------- Build & Run ----------
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+// Enable Swagger for all environments
+app.UseSwagger();
+app.UseSwaggerUI();
 
 app.UseHttpsRedirection();
 app.UseAuthentication();

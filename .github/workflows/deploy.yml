@@ -1,0 +1,54 @@
+﻿name: Deploy ASP.NET Core API to AWS Elastic Beanstalk
+
+on:
+  push:
+    branches:
+      - main  # Run workflow on push to main branch
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout code
+      - uses: actions/checkout@v3
+
+      # Step 2: Setup .NET
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '9.0.x'
+
+      # Step 3: Restore dependencies
+      - name: Restore dependencies
+        run: dotnet restore
+
+      # Step 4: Build
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      # Step 5: Publish
+      - name: Publish
+        run: dotnet publish -c Release -o publish
+
+      # Step 6: Zip the published files
+      - name: Zip package
+        run: |
+          cd publish
+          zip -r ../app.zip .
+          cd ..
+
+      # Step 7: Deploy to Elastic Beanstalk
+      - name: Deploy to Elastic Beanstalk
+        uses: einaregilsson/beanstalk-deploy@v21
+        with:
+          application_name: "Sample-AUTH-API"          # Your EB Application Name
+          environment_name: "DEV"          # Your EB Environment Name
+          region: ${{ secrets.AWS_REGION }}
+          version_label: "v${{ github.run_number }}"
+          bucket_name: "myapi-eb-deploy"        # Your S3 bucket
+          bucket_key: "app.zip"
+          deployment_package: "app.zip"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

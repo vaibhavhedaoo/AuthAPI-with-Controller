@@ -5,25 +5,29 @@ using System.Text;
 
 public static class JwtTokenGenerator
 {
-    public static string GenerateToken(string userName, string key, string issuer, int expireMinutes = 60)
+   
+    public static string GenerateToken(string userName, IConfiguration configuration)
     {
         var claims = new[]
-        {
-            new Claim(JwtRegisteredClaimNames.Sub, userName),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
-        };
+    {
+        new Claim(JwtRegisteredClaimNames.Sub, userName),
+        new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+    };
 
-        var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
+        var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(configuration["Jwt:Key"]));
         var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
 
         var token = new JwtSecurityToken(
-            issuer,
-            issuer,
-            claims,
-            expires: DateTime.UtcNow.AddMinutes(expireMinutes),
+            issuer: configuration["Jwt:Issuer"],
+            audience: configuration["Jwt:Audience"],
+            claims: claims,
+            expires: DateTime.UtcNow.AddMinutes(10),
             signingCredentials: credentials
         );
 
-        return new JwtSecurityTokenHandler().WriteToken(token);
+        var tokenString = new JwtSecurityTokenHandler().WriteToken(token);
+
+        // Prefix the token string before returning
+        return $"Bearer {tokenString}";
     }
 }

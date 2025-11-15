@@ -12,13 +12,15 @@ public class AuthController : ControllerBase
     private readonly SignInManager<User> _signInManager;
     private readonly ILogger<AuthController> _logger;
     private readonly IEmailService _emailService;
+    private readonly IConfiguration _config;
 
-    public AuthController(UserManager<User> userManager, SignInManager<User> signInManager, ILogger<AuthController> logger, IEmailService emailService)
+    public AuthController(UserManager<User> userManager, SignInManager<User> signInManager, ILogger<AuthController> logger, IEmailService emailService, IConfiguration config)
     {
         _userManager = userManager;
         _signInManager = signInManager;
         _logger = logger;
         _emailService = emailService;
+        _config = config;
     }
 
     // -------------------------
@@ -27,7 +29,7 @@ public class AuthController : ControllerBase
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] RegisterRequest request)
     {
-        _logger.LogInformation("Register started", request);
+        _logger.LogInformation("Register started with request: {@Request}", request);
         var user = new User
         {
             UserName = request.UserName,
@@ -56,15 +58,16 @@ public class AuthController : ControllerBase
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginRequest request)
     {
+        _logger.LogInformation("Login request received...");
         var result = await _signInManager.PasswordSignInAsync(request.UserName, request.Password, false, false);
 
         if (!result.Succeeded)
             return Unauthorized(new { message = "Invalid credentials" });
 
         // Generate JWT
-        var jwtKey = "SuperSecretKey12345"; // or read from configuration
-        var jwtIssuer = "AuthAPI"; // or read from configuration
-        var token = JwtTokenGenerator.GenerateToken(request.UserName, jwtKey, jwtIssuer);
+        //var jwtKey = builder.Configuration["Jwt:Key"];// "SuperSecretKey12345"; // or read from configuration
+        //var jwtIssuer = builder.Configuration["Jwt:Key"]; // or read from configuration
+        var token = JwtTokenGenerator.GenerateToken(request.UserName, _config);
 
         return Ok(new
         {
