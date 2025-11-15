@@ -3,8 +3,8 @@
 on:
   push:
     branches:
-      - common-devlopement   # Trigger workflow on push to this branch
-  workflow_dispatch:         # Optional: allows manual run from GitHub UI
+      - common-devlopement  # Trigger workflow on push to this branch
+  workflow_dispatch:       # Optional: allows manual run from GitHub UI
 
 jobs:
   build-and-deploy:
@@ -12,8 +12,8 @@ jobs:
 
     env:
       APP_NAME: "Sample-AUTH-API"
-      ENV_NAME: "DEVELOPMENT"   # Must be at least 4 chars
-      SOLUTION_STACK_NAME: "64bit Amazon Linux 2 v5.15.7 running .NET 6" # Replace if newer supported version exists
+      ENV_NAME: "DEVELOPMENT"      # EB environment name (must be >= 4 chars)
+      REGION: ${{ secrets.AWS_REGION }}
       VERSION_LABEL: "v${{ github.run_number }}"
 
     steps:
@@ -53,61 +53,59 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Step 8: Check if EB application exists
-      - name: Check EB application
-        id: check_app
+      # Step 8: Ensure S3 bucket exists and upload package
+      - name: Upload package to S3
         run: |
-          if aws elasticbeanstalk describe-applications --application-names "$APP_NAME" --query 'Applications[0].ApplicationName' --output text | grep -q "$APP_NAME"; then
-            echo "Application exists."
-            echo "exists=true" >> $GITHUB_OUTPUT
+          # Use unique bucket name by appending AWS account ID
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="${APP_NAME}-${ACCOUNT_ID}-${REGION}"
+          
+          # Create bucket if it doesn't exist
+          if ! aws s3 ls "s3://$BUCKET_NAME" 2>&1 | grep -q 'NoSuchBucket'; then
+            echo "Bucket $BUCKET_NAME exists."
           else
-            echo "Application does not exist."
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Bucket $BUCKET_NAME does not exist. Creating..."
+            aws s3 mb "s3://$BUCKET_NAME" --region $REGION
           fi
 
-      # Step 9: Create EB application if it doesn't exist
-      - name: Create EB application
-        if: steps.check_app.outputs.exists == 'false'
-        run: |
-          aws elasticbeanstalk create-application \
-            --application-name "$APP_NAME" \
-            --description "Application created by GitHub Actions"
+          # Upload the application package
+          aws s3 cp app.zip s3://$BUCKET_NAME/$VERSION_LABEL.zip
 
-      # Step 10: Upload application version
-      - name: Upload application version
+      # Step 9: Ensure EB Application exists
+      - name: Ensure EB Application exists
         run: |
-          aws s3 cp app.zip s3://$APP_NAME/$VERSION_LABEL.zip
+          if aws elasticbeanstalk describe-applications --application-names "$APP_NAME" --query "Applications" | grep -q 'null'; then
+            echo "Application $APP_NAME does not exist. Creating..."
+            aws elasticbeanstalk create-application --application-name "$APP_NAME"
+          else
+            echo "Application $APP_NAME already exists."
+          fi
+
+      # Step 10: Create EB application version
+      - name: Create EB application version
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET_NAME="${APP_NAME}-${ACCOUNT_ID}-${REGION}"
+
           aws elasticbeanstalk create-application-version \
             --application-name "$APP_NAME" \
             --version-label "$VERSION_LABEL" \
-            --source-bundle S3Bucket="$APP_NAME",S3Key="$VERSION_LABEL.zip"
+            --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$VERSION_LABEL.zip"
 
-      # Step 11: Check if EB environment exists
-      - name: Check EB environment
-        id: check_env
+      # Step 11: Ensure EB environment exists or update it
+      - name: Create or update EB environment
         run: |
-          if aws elasticbeanstalk describe-environments --application-name "$APP_NAME" --environment-names "$ENV_NAME" --query 'Environments[0].EnvironmentName' --output text | grep -q "$ENV_NAME"; then
-            echo "Environment exists."
-            echo "exists=true" >> $GITHUB_OUTPUT
+          ENV_INFO=$(aws elasticbeanstalk describe-environments --application-name "$APP_NAME" --environment-names "$ENV_NAME" --query "Environments[0]")
+          if [ "$ENV_INFO" = "null" ]; then
+            echo "Environment $ENV_NAME does not exist. Creating..."
+            aws elasticbeanstalk create-environment \
+              --application-name "$APP_NAME" \
+              --environment-name "$ENV_NAME" \
+              --solution-stack-name "64bit Amazon Linux 2 v5.15.7 running .NET 9" \
+              --version-label "$VERSION_LABEL"
           else
-            echo "Environment does not exist."
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Environment $ENV_NAME exists. Updating..."
+            aws elasticbeanstalk update-environment \
+              --environment-name "$ENV_NAME" \
+              --version-label "$VERSION_LABEL"
           fi
-
-      # Step 12: Create EB environment if it doesn't exist
-      - name: Create EB environment
-        if: steps.check_env.outputs.exists == 'false'
-        run: |
-          aws elasticbeanstalk create-environment \
-            --application-name "$APP_NAME" \
-            --environment-name "$ENV_NAME" \
-            --solution-stack-name "$SOLUTION_STACK_NAME" \
-            --version-label "$VERSION_LABEL"
-
-      # Step 13: Update EB environment if it exists
-      - name: Update EB environment
-        if: steps.check_env.outputs.exists == 'true'
-        run: |
-          aws elasticbeanstalk update-environment \
-            --environment-name "$ENV_NAME" \
-            --version-label "$VERSION_LABEL"
