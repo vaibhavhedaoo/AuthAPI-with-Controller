@@ -3,8 +3,8 @@
 on:
   push:
     branches:
-      - common-devlopement  # Trigger workflow on this branch
-  workflow_dispatch:       # Optional: allows manual run
+      - common-devlopement
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
@@ -13,95 +13,102 @@ jobs:
     env:
       APP_NAME: "Sample-AUTH-API"
       REGION: ${{ secrets.AWS_REGION }}
+      ENV_NAME: "development"
 
     steps:
-      # Step 1: Checkout code
       - uses: actions/checkout@v3
 
-      # Step 2: Setup .NET
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '9.0.x'
 
-      # Step 3: Restore dependencies
       - name: Restore dependencies
         run: dotnet restore
 
-      # Step 4: Build
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      # Step 5: Publish
       - name: Publish
         run: dotnet publish -c Release -o publish
 
-      # Step 6: Zip the published files
-      - name: Zip package
+      - name: Zip published output
         run: |
           cd publish
           zip -r ../app.zip .
           cd ..
 
-      # Step 7: Configure AWS credentials
-      - name: Configure AWS Credentials
+      - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Step 8: Ensure S3 bucket exists and upload package
-      - name: Upload package to S3
+      - name: Find a valid .NET platform ARN
+        id: get_platform
+        run: |
+          # List platform versions which are Ready and contain "dotnet"
+          ARN=$(aws elasticbeanstalk list-platform-versions \
+            --filters "PlatformStatus=Ready" \
+            --query "PlatformSummaryList[?contains(PlatformBranchName, 'dotnet')].PlatformArn" \
+            --output text | head -n1)
+          echo "Found platform ARN: $ARN"
+          echo "platform_arn=$ARN" >> $GITHUB_OUTPUT
+
+      - name: Ensure S3 bucket exists & upload package
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           APP_NAME_LOWER=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
           BUCKET_NAME="${APP_NAME_LOWER}-${ACCOUNT_ID}-${REGION}"
           VERSION_LABEL="v${GITHUB_RUN_NUMBER}"
 
-          echo "Using bucket: $BUCKET_NAME"
-          
+          echo "Bucket name: $BUCKET_NAME"
+
           # Create bucket if it doesn't exist
-          if ! aws s3 ls "s3://$BUCKET_NAME" 2>&1 | grep -q 'PRE'; then
+          if ! aws s3 ls "s3://$BUCKET_NAME" 2>&1 | grep -q 'NoSuchBucket'; then
             echo "Bucket $BUCKET_NAME does not exist. Creating..."
             aws s3 mb "s3://$BUCKET_NAME" --region $REGION
           else
-            echo "Bucket $BUCKET_NAME exists."
+            echo "Bucket $BUCKET_NAME exists"
           fi
 
-          # Upload package
-          aws s3 cp app.zip s3://$BUCKET_NAME/$VERSION_LABEL.zip
+          # Upload zip
+          aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
 
-      # Step 9: Create EB application if not exists
-      - name: Ensure Elastic Beanstalk Application Exists
+      - name: Ensure EB application exists
         run: |
           if ! aws elasticbeanstalk describe-applications --application-names "$APP_NAME" | grep -q "$APP_NAME"; then
-            echo "Creating Elastic Beanstalk application: $APP_NAME"
+            echo "Creating EB application $APP_NAME"
             aws elasticbeanstalk create-application --application-name "$APP_NAME"
           else
-            echo "Elastic Beanstalk application $APP_NAME already exists."
+            echo "EB application already exists"
           fi
 
-      # Step 10: Create or update EB environment
-      - name: Create/Update Elastic Beanstalk Environment
+      - name: Create or update EB environment
         run: |
-          ENV_NAME="development"  # Must be at least 4 characters
+          PLATFORM_ARN="${{ steps.get_platform.outputs.platform_arn }}"
           VERSION_LABEL="v${GITHUB_RUN_NUMBER}"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           APP_NAME_LOWER=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
           BUCKET_NAME="${APP_NAME_LOWER}-${ACCOUNT_ID}-${REGION}"
 
           # Check if environment exists
-          if aws elasticbeanstalk describe-environments --application-name "$APP_NAME" --environment-names "$ENV_NAME" --no-include-deleted | grep -q "$ENV_NAME"; then
-            echo "Environment $ENV_NAME exists. Updating application version..."
-            aws elasticbeanstalk update-environment --environment-name "$ENV_NAME" --version-label "$VERSION_LABEL"
-          else
-            echo "Environment $ENV_NAME does not exist. Creating..."
-            # You may need to choose a valid solution stack for .NET 9
-            SOLUTION_STACK="64bit Amazon Linux 2 v5.15.7 running .NET 9"
+          ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
+            --application-name "$APP_NAME" \
+            --environment-names "$ENV_NAME" \
+            --no-include-deleted \
+            --query "Environments | length(@)")
+          if [ "$ENV_EXISTS" -eq "0" ]; then
+            echo "Environment does not exist – creating"
             aws elasticbeanstalk create-environment \
               --application-name "$APP_NAME" \
               --environment-name "$ENV_NAME" \
-              --solution-stack-name "$SOLUTION_STACK" \
-              --version-label "$VERSION_LABEL" \
-              --option-settings Namespace=aws:elasticbeanstalk:environment,OptionName=EnvironmentType,Value=LoadBalanced
+              --platform-arn "$PLATFORM_ARN" \
+              --version-label "$VERSION_LABEL"
+          else
+            echo "Environment exists – updating to version $VERSION_LABEL"
+            aws elasticbeanstalk update-environment \
+              --environment-name "$ENV_NAME" \
+              --version-label "$VERSION_LABEL"
           fi
