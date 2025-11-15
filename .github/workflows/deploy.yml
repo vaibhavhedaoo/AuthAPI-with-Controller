@@ -39,7 +39,7 @@ jobs:
           zip -r ../app.zip .
           cd ..
 
-      # 7. Configure AWS environment variables
+      # 7. Configure AWS credentials
       - name: Configure AWS
         run: |
           echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
@@ -72,7 +72,7 @@ jobs:
           aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
           echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      # 10. Ensure Elastic Beanstalk Application Exists
+      # 10. Ensure EB Application exists
       - name: Ensure EB Application
         run: |
           APP_NAME="Sample-AUTH-API"
@@ -82,13 +82,13 @@ jobs:
             --output text >/dev/null 2>&1 || \
             aws elasticbeanstalk create-application --application-name "$APP_NAME"
 
-      # 11. Determine valid .NET Core on AL2 platform ARN
+      # 11. Determine the latest .NET Core on AL2 Platform ARN
       - name: Determine .NET AL2 Platform ARN
         id: get_platform
         run: |
           PLATFORM_ARN=$(aws elasticbeanstalk list-platform-versions \
             --filters "Type=PlatformName,Operator=contains,Values=.NET" \
-            --query "PlatformSummaryList[?contains(PlatformArn,'linux')]|[0].PlatformArn" \
+            --query "sort_by(PlatformSummaryList[?contains(PlatformArn,'linux')], &PlatformVersion)[-1].PlatformArn" \
             --output text)
 
           if [ -z "$PLATFORM_ARN" ] || [ "$PLATFORM_ARN" = "None" ]; then
@@ -99,7 +99,7 @@ jobs:
           echo "Using PLATFORM_ARN=$PLATFORM_ARN"
           echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
 
-      # 12. Create or update Elastic Beanstalk environment
+      # 12. Create or Update EB Environment
       - name: Create or Update EB Environment
         run: |
           APP_NAME="Sample-AUTH-API"
