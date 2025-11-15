@@ -43,11 +43,10 @@ jobs:
       - name: Deploy to Elastic Beanstalk
         uses: einaregilsson/beanstalk-deploy@v21
         with:
-          application_name: "Sample-AUTH-API"      # Your EB Application Name
-          environment_name: "DEV"                   # Your EB Environment Name
-          region: ${{ secrets.AWS_REGION }}        # AWS region secret
-          version_label: "v${{ github.run_number }}" # Unique version label
-          deployment_package: "app.zip"            # Only this is required
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          region: ${{ secrets.AWS_REGION }}
+          application_name: "Sample-AUTH-API"
+          environment_name: "DEV"
+          version_label: "v${{ github.run_number }}"
+          deployment_package: "app.zip"
