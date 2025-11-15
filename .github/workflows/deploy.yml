@@ -93,11 +93,18 @@ jobs:
 
       # 12. Create or update EB environment
       - name: Create or Update EB Environment
+        env:
+          PLATFORM_ARN: "${{ env.PLATFORM_ARN }}"
+          VERSION_LABEL: "${{ env.VERSION_LABEL }}"
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          BUCKET_NAME: sample-auth-api-${{ secrets.AWS_ACCOUNT_ID }}
         run: |
           APP_NAME="Sample-AUTH-API"
           ENV_NAME="development"
-          VERSION_LABEL="${{ env.VERSION_LABEL }}"
-          PLATFORM_ARN="${{ env.PLATFORM_ARN }}"
+          VERSION_LABEL="${VERSION_LABEL}"
+          PLATFORM_ARN="${PLATFORM_ARN}"
 
           ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
             --application-name "$APP_NAME" \
@@ -117,3 +124,4 @@ jobs:
             aws elasticbeanstalk update-environment \
               --environment-name "$ENV_NAME" \
               --version-label "$VERSION_LABEL"
+           fi
