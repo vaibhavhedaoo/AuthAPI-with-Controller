@@ -3,111 +3,94 @@
 on:
   push:
     branches:
-      - common-devlopement
-  workflow_dispatch:
+      - common-devlopement  # Trigger workflow on this branch
+  workflow_dispatch:       # Optional: manual run from GitHub UI
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
-    env:
-      APP_NAME: "Sample-AUTH-API"
-      REGION: ${{ secrets.AWS_REGION }}
-      ENV_NAME: "development"
-
     steps:
+      # Step 1: Checkout code
       - uses: actions/checkout@v3
 
+      # Step 2: Setup .NET
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '9.0.x'
 
+      # Step 3: Restore dependencies
       - name: Restore dependencies
         run: dotnet restore
 
+      # Step 4: Build
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
+      # Step 5: Publish
       - name: Publish
         run: dotnet publish -c Release -o publish
 
-      - name: Zip published output
+      # Step 6: Zip the published files
+      - name: Zip package
         run: |
           cd publish
           zip -r ../app.zip .
           cd ..
 
+      # Step 7: Configure AWS env vars
       - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Find a valid .NET platform ARN
-        id: get_platform
         run: |
-          # List platform versions which are Ready and contain "dotnet"
-          ARN=$(aws elasticbeanstalk list-platform-versions \
-            --filters "PlatformStatus=Ready" \
-            --query "PlatformSummaryList[?contains(PlatformBranchName, 'dotnet')].PlatformArn" \
-            --output text | head -n1)
-          echo "Found platform ARN: $ARN"
-          echo "platform_arn=$ARN" >> $GITHUB_OUTPUT
+          echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
 
-      - name: Ensure S3 bucket exists & upload package
+      # Step 8: Ensure S3 bucket exists
+      - name: Ensure S3 bucket exists
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          APP_NAME_LOWER=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
-          BUCKET_NAME="${APP_NAME_LOWER}-${ACCOUNT_ID}-${REGION}"
+          APP_NAME="Sample-AUTH-API"
+          BUCKET_NAME="${APP_NAME}-${{ secrets.AWS_ACCOUNT_ID }}"
+          aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || \
+            aws s3 mb "s3://$BUCKET_NAME" --region $AWS_REGION
+          echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
+
+      # Step 9: Upload zip to S3
+      - name: Upload to S3
+        run: |
           VERSION_LABEL="v${GITHUB_RUN_NUMBER}"
-
-          echo "Bucket name: $BUCKET_NAME"
-
-          # Create bucket if it doesn't exist
-          if ! aws s3 ls "s3://$BUCKET_NAME" 2>&1 | grep -q 'NoSuchBucket'; then
-            echo "Bucket $BUCKET_NAME does not exist. Creating..."
-            aws s3 mb "s3://$BUCKET_NAME" --region $REGION
-          else
-            echo "Bucket $BUCKET_NAME exists"
-          fi
-
-          # Upload zip
           aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
+          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      - name: Ensure EB application exists
+      # Step 10: Ensure Elastic Beanstalk application exists
+      - name: Ensure EB application
         run: |
-          if ! aws elasticbeanstalk describe-applications --application-names "$APP_NAME" | grep -q "$APP_NAME"; then
-            echo "Creating EB application $APP_NAME"
+          APP_NAME="Sample-AUTH-API"
+          if ! aws elasticbeanstalk describe-applications --application-names "$APP_NAME" --query "Applications[0].ApplicationName" --output text >/dev/null 2>&1; then
             aws elasticbeanstalk create-application --application-name "$APP_NAME"
-          else
-            echo "EB application already exists"
           fi
 
-      - name: Create or update EB environment
+      # Step 11: Ensure EB environment exists
+      - name: Ensure EB environment
         run: |
-          PLATFORM_ARN="${{ steps.get_platform.outputs.platform_arn }}"
-          VERSION_LABEL="v${GITHUB_RUN_NUMBER}"
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          APP_NAME_LOWER=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
-          BUCKET_NAME="${APP_NAME_LOWER}-${ACCOUNT_ID}-${REGION}"
-
+          APP_NAME="Sample-AUTH-API"
+          ENV_NAME="development"  # Must be at least 4 characters
+          SOLUTION_STACK="64bit Amazon Linux 2 v5.15.7 running .NET 6"
           # Check if environment exists
           ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
             --application-name "$APP_NAME" \
             --environment-names "$ENV_NAME" \
-            --no-include-deleted \
-            --query "Environments | length(@)")
-          if [ "$ENV_EXISTS" -eq "0" ]; then
-            echo "Environment does not exist – creating"
+            --query "Environments[0].EnvironmentName" \
+            --output text 2>/dev/null)
+          if [ "$ENV_EXISTS" = "None" ] || [ -z "$ENV_EXISTS" ]; then
+            echo "Creating environment $ENV_NAME..."
             aws elasticbeanstalk create-environment \
               --application-name "$APP_NAME" \
               --environment-name "$ENV_NAME" \
-              --platform-arn "$PLATFORM_ARN" \
+              --solution-stack-name "$SOLUTION_STACK" \
               --version-label "$VERSION_LABEL"
           else
-            echo "Environment exists – updating to version $VERSION_LABEL"
+            echo "Updating environment $ENV_NAME..."
             aws elasticbeanstalk update-environment \
               --environment-name "$ENV_NAME" \
               --version-label "$VERSION_LABEL"
