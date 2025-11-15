@@ -3,50 +3,83 @@
 on:
   push:
     branches:
-      - common-devlopement  # Trigger workflow on push to this branch
-  workflow_dispatch:       # Optional: allows manual run from GitHub UI
+      - common-devlopement
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout code
+      # 1️⃣ Checkout code
       - uses: actions/checkout@v3
 
-      # Step 2: Setup .NET
+      # 2️⃣ Setup .NET
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '9.0.x'
 
-      # Step 3: Restore dependencies
+      # 3️⃣ Restore dependencies
       - name: Restore dependencies
         run: dotnet restore
 
-      # Step 4: Build
+      # 4️⃣ Build
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      # Step 5: Publish
+      # 5️⃣ Publish
       - name: Publish
         run: dotnet publish -c Release -o publish
 
-      # Step 6: Zip the published files
+      # 6️⃣ Zip the published files
       - name: Zip package
         run: |
           cd publish
           zip -r ../app.zip .
           cd ..
 
-      # Step 7: Deploy to Elastic Beanstalk
+      # 7️⃣ Setup AWS CLI
+      - name: Configure AWS CLI
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # 8️⃣ Create EB Application if not exists
+      - name: Ensure Elastic Beanstalk Application Exists
+        run: |
+          APP_NAME="Sample-AUTH-API"
+          if ! aws elasticbeanstalk describe-applications --application-names "$APP_NAME" --query 'Applications[0].ApplicationName' --output text | grep -q "$APP_NAME"; then
+            echo "Creating Elastic Beanstalk application: $APP_NAME"
+            aws elasticbeanstalk create-application --application-name "$APP_NAME"
+          else
+            echo "Application $APP_NAME already exists"
+          fi
+
+      # 9️⃣ Create EB Environment if not exists
+      - name: Ensure Elastic Beanstalk Environment Exists
+        run: |
+          APP_NAME="Sample-AUTH-API"
+          ENV_NAME="DEV"
+          if ! aws elasticbeanstalk describe-environments --application-name "$APP_NAME" --environment-names "$ENV_NAME" --query 'Environments[0].EnvironmentName' --output text | grep -q "$ENV_NAME"; then
+            echo "Creating environment: $ENV_NAME for application: $APP_NAME"
+            aws elasticbeanstalk create-environment \
+              --application-name "$APP_NAME" \
+              --environment-name "$ENV_NAME" \
+              --solution-stack-name "64bit Amazon Linux 2 v5.15.7 running .NET 9" \
+              --option-settings Namespace=aws:autoscaling:launchconfiguration,OptionName=InstanceType,Value=t2.micro
+          else
+            echo "Environment $ENV_NAME already exists"
+          fi
+
+      # 🔟 Deploy to Elastic Beanstalk
       - name: Deploy to Elastic Beanstalk
         uses: einaregilsson/beanstalk-deploy@v21
         with:
-          aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          region: ${{ secrets.AWS_REGION }}
           application_name: "Sample-AUTH-API"
           environment_name: "DEV"
-          version_label: "v${{ github.run_number }}"
+          region: ${{ secrets.AWS_REGION }}
+          version_label: "v${{ github.run_number }}-${{ github.run_id }}-${{ github.run_attempt }}"
           deployment_package: "app.zip"
