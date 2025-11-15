@@ -11,48 +11,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout code
       - uses: actions/checkout@v3
 
-      # Step 2: Setup .NET
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '9.0.x'
 
-      # Step 3: Restore dependencies
       - name: Restore dependencies
         run: dotnet restore
 
-      # Step 4: Build
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      # Step 5: Publish
       - name: Publish
         run: dotnet publish -c Release -o publish
 
-      # Step 6: Zip the published files
       - name: Zip package
         run: |
           cd publish
           zip -r ../app.zip .
           cd ..
 
-      # Step 7: Configure AWS credentials
       - name: Configure AWS
         run: |
           echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
           echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
 
-      # Step 8: Ensure S3 bucket exists (with lowercase bucket + secret validation)
       - name: Ensure S3 bucket exists
         run: |
-          # Validate AWS_ACCOUNT_ID
           if [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
             echo "❌ ERROR: AWS_ACCOUNT_ID secret is missing!"
-            echo "Go to: GitHub Repo → Settings → Secrets → Actions → Add AWS_ACCOUNT_ID"
             exit 1
           fi
 
@@ -67,14 +57,12 @@ jobs:
 
           echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
 
-      # Step 9: Upload zip to S3
       - name: Upload to S3
         run: |
           VERSION_LABEL="v${GITHUB_RUN_NUMBER}"
           aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
           echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      # Step 10: Ensure Elastic Beanstalk Application Exists
       - name: Ensure EB application
         run: |
           APP_NAME="Sample-AUTH-API"
@@ -84,18 +72,16 @@ jobs:
             --query "Applications[0].ApplicationName" \
             --output text >/dev/null 2>&1; then
 
-            echo "Creating EB Application: $APP_NAME"
             aws elasticbeanstalk create-application --application-name "$APP_NAME"
-          else
-            echo "EB Application already exists: $APP_NAME"
           fi
 
-      # Step 11: Create or Update Elastic Beanstalk Environment
       - name: Create/Update EB environment
         run: |
           APP_NAME="Sample-AUTH-API"
           ENV_NAME="development"
-          SOLUTION_STACK="64bit Amazon Linux 2 v5.15.7 running .NET 6"
+
+          # Use latest .NET on Amazon Linux 2 platform ARN
+          PLATFORM_ARN="arn:aws:elasticbeanstalk:${AWS_REGION}::platform/.NET Core on Linux 2/3.7.9"
 
           ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
             --application-name "$APP_NAME" \
@@ -104,14 +90,14 @@ jobs:
             --output text 2>/dev/null)
 
           if [ "$ENV_EXISTS" = "None" ] || [ -z "$ENV_EXISTS" ]; then
-            echo "Creating new EB environment: $ENV_NAME"
+            echo "Creating new EB environment..."
             aws elasticbeanstalk create-environment \
               --application-name "$APP_NAME" \
               --environment-name "$ENV_NAME" \
-              --solution-stack-name "$SOLUTION_STACK" \
+              --platform-arn "$PLATFORM_ARN" \
               --version-label "$VERSION_LABEL"
           else
-            echo "Updating existing EB environment: $ENV_NAME"
+            echo "Updating EB environment..."
             aws elasticbeanstalk update-environment \
               --environment-name "$ENV_NAME" \
               --version-label "$VERSION_LABEL"
