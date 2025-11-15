@@ -11,46 +11,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout
       - uses: actions/checkout@v3
 
-      # Setup .NET
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '9.0.x'
 
-      # Restore
       - name: Restore dependencies
         run: dotnet restore
 
-      # Build
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      # Publish
       - name: Publish
         run: dotnet publish -c Release -o publish
 
-      # Zip output
       - name: Zip package
         run: |
           cd publish
           zip -r ../app.zip .
           cd ..
 
-      # Configure AWS credentials in environment
-      - name: Configure AWS Env Vars
+      - name: Configure AWS credentials
         run: |
           echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
           echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
 
-      # Create S3 bucket
-      - name: Ensure S3 Bucket Exists
+      - name: Ensure S3 bucket exists
         run: |
           if [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
-            echo "ERROR: AWS_ACCOUNT_ID secret is missing!"
+            echo "ERROR: AWS_ACCOUNT_ID is not set"
             exit 1
           fi
 
@@ -59,70 +51,43 @@ jobs:
           BUCKET_NAME="${APP_NAME_LC}-${{ secrets.AWS_ACCOUNT_ID }}"
 
           echo "Using bucket: $BUCKET_NAME"
-
-          # Create bucket only if not exists
           aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || \
             aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
 
           echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
 
-      # Upload app.zip to S3
       - name: Upload to S3
         run: |
           VERSION_LABEL="v${GITHUB_RUN_NUMBER}"
           aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
           echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      # Ensure EB Application Exists
-      - name: Ensure EB Application
+      - name: Ensure EB application exists
         run: |
           APP_NAME="Sample-AUTH-API"
-
-          if ! aws elasticbeanstalk describe-applications \
+          aws elasticbeanstalk describe-applications \
             --application-names "$APP_NAME" \
             --query "Applications[0].ApplicationName" \
-            --output text >/dev/null 2>&1; then
-
-            echo "Creating EB application: $APP_NAME"
+            --output text >/dev/null 2>&1 || \
             aws elasticbeanstalk create-application --application-name "$APP_NAME"
-          else
-            echo "EB Application already exists."
-          fi
 
-      # Get latest valid Elastic Beanstalk .NET platform
-      - name: Determine Valid .NET Platform ARN
-        id: get_platform
-        run: |
-          PLATFORM_ARN=$(aws elasticbeanstalk list-platform-versions \
-            --filters \
-              "Type=PlatformName,Operator=contains,Values=.NET" \
-              "Type=PlatformStatus,Operator=equals,Values=Recommended" \
-            --query "PlatformSummaryList[0].PlatformArn" \
-            --output text)
-
-          if [ "$PLATFORM_ARN" = "None" ] || [ -z "$PLATFORM_ARN" ]; then
-            echo "ERROR: Could not find a valid Elastic Beanstalk .NET platform in this region."
-            exit 1
-          fi
-
-          echo "Using Platform ARN: $PLATFORM_ARN"
-          echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
-
-      # Create or update EB environment
-      - name: Ensure EB Environment
+      - name: Create or Update EB environment
         run: |
           APP_NAME="Sample-AUTH-API"
           ENV_NAME="development"
+          VERSION_LABEL="${{ env.VERSION_LABEL }}"
 
-          # Check if environment exists
-          CURRENT_ENV=$(aws elasticbeanstalk describe-environments \
+          # Use a fixed, valid platform ARN for .NET Core on AL2 (in us-east-1)
+          PLATFORM_ARN="arn:aws:elasticbeanstalk:us-east-1::platform/.NET Core on Linux 2/2.11.7"
+
+          ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
             --application-name "$APP_NAME" \
             --environment-names "$ENV_NAME" \
             --query "Environments[0].EnvironmentName" \
             --output text 2>/dev/null)
 
-          if [ "$CURRENT_ENV" = "None" ] || [ -z "$CURRENT_ENV" ]; then
-            echo "Creating new EB environment..."
+          if [ -z "$ENV_EXISTS" ] || [ "$ENV_EXISTS" = "None" ]; then
+            echo "Creating EB environment..."
             aws elasticbeanstalk create-environment \
               --application-name "$APP_NAME" \
               --environment-name "$ENV_NAME" \
