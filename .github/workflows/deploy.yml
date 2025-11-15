@@ -64,15 +64,19 @@ jobs:
           aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
           echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      # 10. Ensure EB application exists
-      - name: Ensure EB Application
+      # 10. Create EB Application Version
+      - name: Create EB Application Version
         run: |
           APP_NAME="Sample-AUTH-API"
-          aws elasticbeanstalk describe-applications \
-            --application-names "$APP_NAME" \
-            --query "Applications[0].ApplicationName" \
-            --output text >/dev/null 2>&1 || \
-            aws elasticbeanstalk create-application --application-name "$APP_NAME"
+          VERSION_LABEL="${{ env.VERSION_LABEL }}"
+          BUCKET_NAME="${{ env.BUCKET_NAME }}"
+          ZIP_FILE="$VERSION_LABEL.zip"
+
+          aws elasticbeanstalk create-application-version \
+            --application-name "$APP_NAME" \
+            --version-label "$VERSION_LABEL" \
+            --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$ZIP_FILE" \
+            --auto-create-application
 
       # 11. Determine latest .NET AL2 Platform ARN
       - name: Determine latest .NET AL2 Platform ARN
