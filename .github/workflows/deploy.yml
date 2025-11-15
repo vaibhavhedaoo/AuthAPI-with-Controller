@@ -62,7 +62,7 @@ jobs:
       - name: Ensure Elastic Beanstalk Environment Exists
         run: |
           APP_NAME="Sample-AUTH-API"
-          ENV_NAME="DEV"
+          ENV_NAME="DEVELOPEMENT"
           if ! aws elasticbeanstalk describe-environments --application-name "$APP_NAME" --environment-names "$ENV_NAME" --query 'Environments[0].EnvironmentName' --output text | grep -q "$ENV_NAME"; then
             echo "Creating environment: $ENV_NAME for application: $APP_NAME"
             aws elasticbeanstalk create-environment \
