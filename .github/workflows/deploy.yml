@@ -33,7 +33,7 @@ jobs:
           zip -r ../app.zip .
           cd ..
 
-      - name: Configure AWS
+      - name: Configure AWS Credentials
         run: |
           echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
           echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
@@ -42,7 +42,7 @@ jobs:
       - name: Ensure S3 bucket exists
         run: |
           if [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
-            echo "ERROR: AWS_ACCOUNT_ID secret is missing"
+            echo "ERROR: Missing AWS_ACCOUNT_ID secret"
             exit 1
           fi
 
@@ -50,7 +50,8 @@ jobs:
           APP_NAME_LOWER=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
           BUCKET_NAME="${APP_NAME_LOWER}-${{ secrets.AWS_ACCOUNT_ID }}"
 
-          echo "Using bucket: $BUCKET_NAME"
+          echo "Bucket: $BUCKET_NAME"
+
           aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || \
             aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
 
@@ -62,7 +63,7 @@ jobs:
           aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
           echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      - name: Ensure EB application exists
+      - name: Ensure EB Application Exists
         run: |
           APP_NAME="Sample-AUTH-API"
           aws elasticbeanstalk describe-applications \
@@ -71,30 +72,31 @@ jobs:
             --output text >/dev/null 2>&1 || \
             aws elasticbeanstalk create-application --application-name "$APP_NAME"
 
-      - name: Determine latest .NET AL2 Platform ARN
+      - name: Determine Valid .NET Platform ARN
         id: get_platform
         run: |
-          # List all platform versions, filter for .NET on Amazon Linux 2, pick the latest
           PLATFORM_ARN=$(aws elasticbeanstalk list-platform-versions \
-            --filters "Operator=contains,Name=PlatformBranchName,Values=.NET Core on Linux" \
-            "Operator=contains,Name=OperatingSystemName,Values=Amazon Linux 2" \
-            --query "PlatformSummaryList[?PlatformStatus=='recommended'].PlatformArn | [0]" \
+            --filters \
+              "Type=PlatformName,Operator=contains,Values=.NET" \
+              "Type=OperatingSystemName,Operator=contains,Values=Amazon Linux 2" \
+              "Type=PlatformStatus,Operator==,Values=Recommended" \
+            --query "PlatformSummaryList[0].PlatformArn" \
             --output text)
 
-          if [ -z "$PLATFORM_ARN" ] || [ "$PLATFORM_ARN" = "None" ]; then
-            echo "ERROR: Could not find a valid .NET + AL2 platform ARN"
+          if [ "$PLATFORM_ARN" = "None" ] || [ -z "$PLATFORM_ARN" ]; then
+            echo "ERROR: Could not find a .NET AL2 Elastic Beanstalk platform!"
             exit 1
           fi
 
-          echo "Using platform ARN: $PLATFORM_ARN"
+          echo "Using platform: $PLATFORM_ARN"
           echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
 
-      - name: Create / Update EB Environment
+      - name: Create or Update EB Environment
         run: |
           APP_NAME="Sample-AUTH-API"
           ENV_NAME="development"
-          VERSION_LABEL="${{ env.VERSION_LABEL }}"
           PLATFORM_ARN="${{ env.PLATFORM_ARN }}"
+          VERSION_LABEL="${{ env.VERSION_LABEL }}"
 
           ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
             --application-name "$APP_NAME" \
@@ -103,14 +105,14 @@ jobs:
             --output text 2>/dev/null)
 
           if [ "$ENV_EXISTS" = "None" ] || [ -z "$ENV_EXISTS" ]; then
-            echo "Creating EB environment with ARN $PLATFORM_ARN"
+            echo "Creating environment..."
             aws elasticbeanstalk create-environment \
               --application-name "$APP_NAME" \
               --environment-name "$ENV_NAME" \
               --platform-arn "$PLATFORM_ARN" \
               --version-label "$VERSION_LABEL"
           else
-            echo "Updating EB environment $ENV_NAME"
+            echo "Updating environment..."
             aws elasticbeanstalk update-environment \
               --environment-name "$ENV_NAME" \
               --version-label "$VERSION_LABEL"
