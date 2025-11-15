@@ -57,10 +57,10 @@ jobs:
             aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
           echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
 
-      # 9. Upload zip to S3
+      # 9. Upload zip to S3 with unique version label
       - name: Upload to S3
         run: |
-          VERSION_LABEL="v${GITHUB_RUN_NUMBER}"
+          VERSION_LABEL="v${GITHUB_RUN_NUMBER}-$(date +%Y%m%d%H%M%S)"
           aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
           echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
@@ -72,11 +72,22 @@ jobs:
           BUCKET_NAME="${{ env.BUCKET_NAME }}"
           ZIP_FILE="$VERSION_LABEL.zip"
 
-          aws elasticbeanstalk create-application-version \
+          # Check if version already exists
+          VERSION_EXISTS=$(aws elasticbeanstalk describe-application-versions \
             --application-name "$APP_NAME" \
-            --version-label "$VERSION_LABEL" \
-            --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$ZIP_FILE" \
-            --auto-create-application
+            --version-labels "$VERSION_LABEL" \
+            --query "ApplicationVersions[0].VersionLabel" \
+            --output text)
+
+          if [ "$VERSION_EXISTS" = "None" ]; then
+            aws elasticbeanstalk create-application-version \
+              --application-name "$APP_NAME" \
+              --version-label "$VERSION_LABEL" \
+              --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$ZIP_FILE" \
+              --auto-create-application
+          else
+            echo "Application version $VERSION_LABEL already exists, skipping creation."
+          fi
 
       # 11. Determine latest .NET AL2 Platform ARN
       - name: Determine latest .NET AL2 Platform ARN
@@ -128,4 +139,4 @@ jobs:
             aws elasticbeanstalk update-environment \
               --environment-name "$ENV_NAME" \
               --version-label "$VERSION_LABEL"
-           fi
+          fi
