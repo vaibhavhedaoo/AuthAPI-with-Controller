@@ -18,7 +18,7 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Restore dependencies
+      - name: Restore
         run: dotnet restore
 
       - name: Build
@@ -27,13 +27,13 @@ jobs:
       - name: Publish
         run: dotnet publish -c Release -o publish
 
-      - name: Zip package
+      - name: Zip publish folder
         run: |
           cd publish
           zip -r ../app.zip .
           cd ..
 
-      - name: Configure AWS credentials
+      - name: Configure AWS
         run: |
           echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
           echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
@@ -42,18 +42,15 @@ jobs:
       - name: Ensure S3 bucket exists
         run: |
           if [ -z "${{ secrets.AWS_ACCOUNT_ID }}" ]; then
-            echo "ERROR: AWS_ACCOUNT_ID is not set"
+            echo "ERROR: AWS_ACCOUNT_ID secret missing"
             exit 1
           fi
-
           APP_NAME="Sample-AUTH-API"
           APP_NAME_LC=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
           BUCKET_NAME="${APP_NAME_LC}-${{ secrets.AWS_ACCOUNT_ID }}"
-
-          echo "Using bucket: $BUCKET_NAME"
+          echo "Bucket = $BUCKET_NAME"
           aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || \
             aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
-
           echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
 
       - name: Upload to S3
@@ -62,23 +59,44 @@ jobs:
           aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
           echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      - name: Ensure EB application exists
+      - name: Ensure EB Application exists
         run: |
           APP_NAME="Sample-AUTH-API"
           aws elasticbeanstalk describe-applications \
             --application-names "$APP_NAME" \
-            --query "Applications[0].ApplicationName" \
-            --output text >/dev/null 2>&1 || \
+            --output text --query "Applications[0].ApplicationName" >/dev/null 2>&1 || \
             aws elasticbeanstalk create-application --application-name "$APP_NAME"
 
-      - name: Create or Update EB environment
+      - name: Determine .NET AL2 Platform ARN (with debug)
+        id: get_platform
+        run: |
+          aws elasticbeanstalk list-platform-versions \
+            --filters \
+              "Type=PlatformName,Operator=contains,Values=.NET" \
+              "Type=OperatingSystemName,Operator=contains,Values=Amazon Linux 2" \
+            --output json > platform-list.json
+
+          echo "PLATFORMS:" 
+          cat platform-list.json
+
+          PLATFORM_ARN=$(jq -r '.PlatformSummaryList[0].PlatformArn' platform-list.json)
+
+          if [ -z "$PLATFORM_ARN" ] || [ "$PLATFORM_ARN" = "null" ]; then
+            echo "ERROR: No valid .NET AL2 platform ARN found."
+            exit 1
+          fi
+
+          echo "Using PLATFORM_ARN = $PLATFORM_ARN"
+          echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
+
+      - name: Create / Update EB Environment
         run: |
           APP_NAME="Sample-AUTH-API"
           ENV_NAME="development"
           VERSION_LABEL="${{ env.VERSION_LABEL }}"
+          PLATFORM_ARN="${{ env.PLATFORM_ARN }}"
 
-          # Use a fixed, valid platform ARN for .NET Core on AL2 (in us-east-1)
-          PLATFORM_ARN="arn:aws:elasticbeanstalk:us-east-1::platform/.NET Core on Linux 2/2.11.7"
+          echo "Creating/updating environment with ARN: $PLATFORM_ARN"
 
           ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
             --application-name "$APP_NAME" \
@@ -87,14 +105,12 @@ jobs:
             --output text 2>/dev/null)
 
           if [ -z "$ENV_EXISTS" ] || [ "$ENV_EXISTS" = "None" ]; then
-            echo "Creating EB environment..."
             aws elasticbeanstalk create-environment \
               --application-name "$APP_NAME" \
               --environment-name "$ENV_NAME" \
               --platform-arn "$PLATFORM_ARN" \
               --version-label "$VERSION_LABEL"
           else
-            echo "Updating EB environment..."
             aws elasticbeanstalk update-environment \
               --environment-name "$ENV_NAME" \
               --version-label "$VERSION_LABEL"
