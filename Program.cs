@@ -12,22 +12,24 @@ using Serilog.Sinks.AwsCloudWatch;
 using Serilog.Sinks.MSSqlServer;
 using System.Text;
 
+// ------------------------------------------------------------
+// EB FIX #1 → Bind to PORT provided by Elastic Beanstalk
+// ------------------------------------------------------------
 var builder = WebApplication.CreateBuilder(args);
 
-//
-// ---------- IMPORTANT FOR AWS EB ----------
-// Bind to the port Elastic Beanstalk provides (PORT = 5000)
-// Without this, EB will return 404/502
-//
 var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
 builder.WebHost.UseUrls($"http://*:{port}");
 
-// ---------- Read AWS settings ----------
+// ------------------------------------------------------------
+// Read AWS settings
+// ------------------------------------------------------------
 var awsAccessKey = builder.Configuration["AWS:AccessKey"];
 var awsSecretKey = builder.Configuration["AWS:SecretKey"];
 var awsRegion = builder.Configuration["AWS:Region"];
 
-// ---------- Configure Serilog ----------
+// ------------------------------------------------------------
+// Configure Serilog
+// ------------------------------------------------------------
 var writeTo = builder.Configuration["Logging:WriteTo"];
 var loggerConfig = new LoggerConfiguration()
     .MinimumLevel.Debug();
@@ -39,8 +41,9 @@ switch (writeTo)
         break;
 
     case "File":
+        // EB is Linux, so use Linux file path
         loggerConfig.WriteTo.File(
-            "logs/app_log_.txt",
+            "/var/log/app-log.txt",
             rollingInterval: RollingInterval.Day,
             restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information
         );
@@ -60,8 +63,13 @@ switch (writeTo)
         break;
 
     case "CloudWatch":
-        var credentials = new BasicAWSCredentials(awsAccessKey, awsSecretKey);
-        var client = new AmazonCloudWatchLogsClient(credentials, RegionEndpoint.GetBySystemName(awsRegion));
+        // ------------------------------------------------------------
+        // EB FIX #2 → Use IAM Role instead of appsettings Access Keys
+        // EB supplies SDK credentials automatically via Instance Role
+        // ------------------------------------------------------------
+        var cwClient = new AmazonCloudWatchLogsClient(
+            RegionEndpoint.GetBySystemName(awsRegion)
+        );
 
         var cloudWatchOptions = new CloudWatchSinkOptions
         {
@@ -71,7 +79,7 @@ switch (writeTo)
             CreateLogGroup = true
         };
 
-        loggerConfig.WriteTo.AmazonCloudWatch(cloudWatchOptions, client);
+        loggerConfig.WriteTo.AmazonCloudWatch(cloudWatchOptions, cwClient);
         break;
 
     default:
@@ -79,10 +87,13 @@ switch (writeTo)
         break;
 }
 
+// Set Serilog as the logging provider
 Log.Logger = loggerConfig.CreateLogger();
 builder.Host.UseSerilog();
 
-// ---------- Add Services ----------
+// ------------------------------------------------------------
+// Add Services
+// ------------------------------------------------------------
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
@@ -100,7 +111,7 @@ builder.Services.AddSwaggerGen(c =>
         Scheme = "Bearer",
         BearerFormat = "JWT",
         In = Microsoft.OpenApi.Models.ParameterLocation.Header,
-        Description = "Enter token as: Bearer <your_token>"
+        Description = "Enter your JWT token as: Bearer <token>"
     });
 
     c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
@@ -114,16 +125,20 @@ builder.Services.AddSwaggerGen(c =>
                     Id = "Bearer"
                 }
             },
-            Array.Empty<string>()
+            new string[] {}
         }
     });
 });
 
-// ---------- Database ----------
+// ------------------------------------------------------------
+// Database
+// ------------------------------------------------------------
 builder.Services.AddDbContext<AppDBContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-// ---------- Identity ----------
+// ------------------------------------------------------------
+// Identity
+// ------------------------------------------------------------
 builder.Services.AddIdentity<User, IdentityRole>(options =>
 {
     options.Password.RequireDigit = true;
@@ -132,7 +147,9 @@ builder.Services.AddIdentity<User, IdentityRole>(options =>
 .AddEntityFrameworkStores<AppDBContext>()
 .AddDefaultTokenProviders();
 
-// ---------- JWT ----------
+// ------------------------------------------------------------
+// JWT Authentication
+// ------------------------------------------------------------
 var jwtKey = builder.Configuration["Jwt:Key"];
 var jwtIssuer = builder.Configuration["Jwt:Issuer"];
 
@@ -143,7 +160,9 @@ builder.Services.AddAuthentication(options =>
 })
 .AddJwtBearer(options =>
 {
-    options.RequireHttpsMetadata = false;   // EB HTTP support
+    // EB uses HTTP by default → disable HTTPS metadata
+    options.RequireHttpsMetadata = false;
+
     options.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
@@ -158,24 +177,23 @@ builder.Services.AddAuthentication(options =>
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<IEmailService, EmailService>();
 
-// ---------- Build ----------
+// ------------------------------------------------------------
+// Build & Run
+// ------------------------------------------------------------
 var app = builder.Build();
 
-// ---------- Swagger ----------
 app.UseSwagger();
 app.UseSwaggerUI();
 
-// ---------- Middleware ----------
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
 
-//
-// ---------- Add Root Endpoint & Health Check (Required for EB) ----------
-//
-
+// ------------------------------------------------------------
+// EB FIX #3 → Health & Root Endpoints
+// ------------------------------------------------------------
 app.MapGet("/", () => "API is running on Elastic Beanstalk");
 app.MapGet("/health", () => Results.Ok("Healthy"));
 
