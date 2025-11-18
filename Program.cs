@@ -12,8 +12,15 @@ using Serilog.Sinks.AwsCloudWatch;
 using Serilog.Sinks.MSSqlServer;
 using System.Text;
 
-// ---------- Build app ----------
 var builder = WebApplication.CreateBuilder(args);
+
+//
+// ---------- IMPORTANT FOR AWS EB ----------
+// Bind to the port Elastic Beanstalk provides (PORT = 5000)
+// Without this, EB will return 404/502
+//
+var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
+builder.WebHost.UseUrls($"http://*:{port}");
 
 // ---------- Read AWS settings ----------
 var awsAccessKey = builder.Configuration["AWS:AccessKey"];
@@ -30,6 +37,7 @@ switch (writeTo)
     case "Console":
         loggerConfig.WriteTo.Console();
         break;
+
     case "File":
         loggerConfig.WriteTo.File(
             "logs/app_log_.txt",
@@ -37,6 +45,7 @@ switch (writeTo)
             restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information
         );
         break;
+
     case "Database":
         var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
         loggerConfig.WriteTo.MSSqlServer(
@@ -49,17 +58,11 @@ switch (writeTo)
             restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information
         );
         break;
+
     case "CloudWatch":
-        // Create AWS credentials
         var credentials = new BasicAWSCredentials(awsAccessKey, awsSecretKey);
+        var client = new AmazonCloudWatchLogsClient(credentials, RegionEndpoint.GetBySystemName(awsRegion));
 
-        // Create CloudWatch client
-        var client = new AmazonCloudWatchLogsClient(
-            credentials,
-            RegionEndpoint.GetBySystemName(awsRegion)
-        );
-
-        // CloudWatch sink options
         var cloudWatchOptions = new CloudWatchSinkOptions
         {
             LogGroupName = "AuthAPI-Logs",
@@ -70,12 +73,12 @@ switch (writeTo)
 
         loggerConfig.WriteTo.AmazonCloudWatch(cloudWatchOptions, client);
         break;
+
     default:
         loggerConfig.WriteTo.Console();
         break;
 }
 
-// Set Serilog as the logging provider
 Log.Logger = loggerConfig.CreateLogger();
 builder.Host.UseSerilog();
 
@@ -90,7 +93,6 @@ builder.Services.AddSwaggerGen(c =>
         Version = "v1"
     });
 
-    // JWT Authentication in Swagger
     c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
     {
         Name = "Authorization",
@@ -98,7 +100,7 @@ builder.Services.AddSwaggerGen(c =>
         Scheme = "Bearer",
         BearerFormat = "JWT",
         In = Microsoft.OpenApi.Models.ParameterLocation.Header,
-        Description = "Enter your JWT token as: Bearer <token>"
+        Description = "Enter token as: Bearer <your_token>"
     });
 
     c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
@@ -112,7 +114,7 @@ builder.Services.AddSwaggerGen(c =>
                     Id = "Bearer"
                 }
             },
-            new string[] {}
+            Array.Empty<string>()
         }
     });
 });
@@ -130,7 +132,7 @@ builder.Services.AddIdentity<User, IdentityRole>(options =>
 .AddEntityFrameworkStores<AppDBContext>()
 .AddDefaultTokenProviders();
 
-// ---------- JWT Authentication ----------
+// ---------- JWT ----------
 var jwtKey = builder.Configuration["Jwt:Key"];
 var jwtIssuer = builder.Configuration["Jwt:Issuer"];
 
@@ -141,6 +143,7 @@ builder.Services.AddAuthentication(options =>
 })
 .AddJwtBearer(options =>
 {
+    options.RequireHttpsMetadata = false;   // EB HTTP support
     options.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
@@ -155,15 +158,25 @@ builder.Services.AddAuthentication(options =>
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<IEmailService, EmailService>();
 
-// ---------- Build & Run ----------
+// ---------- Build ----------
 var app = builder.Build();
 
-// Enable Swagger for all environments
+// ---------- Swagger ----------
 app.UseSwagger();
 app.UseSwaggerUI();
 
+// ---------- Middleware ----------
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
+
 app.MapControllers();
+
+//
+// ---------- Add Root Endpoint & Health Check (Required for EB) ----------
+//
+
+app.MapGet("/", () => "API is running on Elastic Beanstalk");
+app.MapGet("/health", () => Results.Ok("Healthy"));
+
 app.Run();
