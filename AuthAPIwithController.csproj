@@ -39,6 +39,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include=".ebextensions\cloudwatch-logs.config" />
     <None Include=".github\workflows\deploy.yml" />
   </ItemGroup>
 

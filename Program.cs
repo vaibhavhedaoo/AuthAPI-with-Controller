@@ -1,6 +1,4 @@
 ﻿using Amazon;
-using Amazon.CloudWatchLogs;
-using Amazon.Runtime;
 using AuthAPIwithController.Models;
 using AuthService.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -8,8 +6,6 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Serilog;
-using Serilog.Formatting.Compact;
-using Serilog.Sinks.MSSqlServer;
 using System.Text;
 
 // ------------------------------------------------------------
@@ -22,12 +18,20 @@ Console.WriteLine($"Elastic Beanstalk PORT = {port}");
 builder.WebHost.UseUrls($"http://*:{port}");
 
 // ------------------------------------------------------------
-// CLEAN & SAFE SERILOG (NO CLOUDWATCH)
+// SAFE SERILOG (NO CLOUDWATCH SINK, NO CRASH)
 // ------------------------------------------------------------
+var logFolder = "/var/app/current/logs";
+var logFile = $"{logFolder}/app-log.txt";
+Directory.CreateDirectory(logFolder);
+
 var loggerConfig = new LoggerConfiguration()
     .MinimumLevel.Debug()
     .WriteTo.Console()
-    .WriteTo.File("/var/log/app-log.txt", rollingInterval: RollingInterval.Day);
+    .WriteTo.File(
+        path: logFile,
+        rollingInterval: RollingInterval.Day,
+        retainedFileCountLimit: 7
+    );
 
 Log.Logger = loggerConfig.CreateLogger();
 builder.Host.UseSerilog();
@@ -51,8 +55,7 @@ builder.Services.AddSwaggerGen(c =>
         Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
         Scheme = "Bearer",
         BearerFormat = "JWT",
-        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
-        Description = "Enter token as: Bearer <token>"
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header
     });
 
     c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
@@ -72,7 +75,7 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // ------------------------------------------------------------
-// Database (fixed path for Linux)
+// Database (Linux path fixed for EB)
 // ------------------------------------------------------------
 builder.Services.AddDbContext<AppDBContext>(options =>
     options.UseSqlite("DataSource=/var/app/current/appdata.db"));
@@ -80,16 +83,17 @@ builder.Services.AddDbContext<AppDBContext>(options =>
 // ------------------------------------------------------------
 // Identity
 // ------------------------------------------------------------
-builder.Services.AddIdentity<User, IdentityRole>(options =>
-{
-    options.Password.RequireDigit = true;
-    options.Password.RequiredLength = 6;
-})
-.AddEntityFrameworkStores<AppDBContext>()
-.AddDefaultTokenProviders();
+builder.Services
+    .AddIdentity<User, IdentityRole>(options =>
+    {
+        options.Password.RequireDigit = true;
+        options.Password.RequiredLength = 6;
+    })
+    .AddEntityFrameworkStores<AppDBContext>()
+    .AddDefaultTokenProviders();
 
 // ------------------------------------------------------------
-// JWT Authentication
+// JWT Auth
 // ------------------------------------------------------------
 var jwtKey = builder.Configuration["Jwt:Key"];
 var jwtIssuer = builder.Configuration["Jwt:Issuer"];
@@ -101,7 +105,7 @@ builder.Services.AddAuthentication(options =>
 })
 .AddJwtBearer(options =>
 {
-    options.RequireHttpsMetadata = false; // EB FIX
+    options.RequireHttpsMetadata = false;
     options.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
@@ -117,17 +121,15 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<IEmailService, EmailService>();
 
 // ------------------------------------------------------------
-// Build app
+// Build App
 // ------------------------------------------------------------
 var app = builder.Build();
 
-// Swagger (always enabled)
 app.UseSwagger();
 app.UseSwaggerUI();
 
 // ------------------------------------------------------------
-// EB FIX → disable HTTPS redirection on Elastic Beanstalk
-// (HTTPS is terminated at the load balancer)
+// EB FIX: disable HTTPS redirection (ALB already uses HTTPS)
 // ------------------------------------------------------------
 if (app.Environment.IsDevelopment())
 {
@@ -136,11 +138,10 @@ if (app.Environment.IsDevelopment())
 
 app.UseAuthentication();
 app.UseAuthorization();
-
 app.MapControllers();
 
 // ------------------------------------------------------------
-// Root & Health endpoints
+// EB Health Endpoints
 // ------------------------------------------------------------
 app.MapGet("/", () => "API is running on Elastic Beanstalk");
 app.MapGet("/health", () => Results.Ok("Healthy"));
