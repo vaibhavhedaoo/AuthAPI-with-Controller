@@ -8,12 +8,12 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Serilog;
-using Serilog.Sinks.AwsCloudWatch;
+using Serilog.Formatting.Compact;
 using Serilog.Sinks.MSSqlServer;
 using System.Text;
 
 // ------------------------------------------------------------
-// EB FIX #1 → Bind to Elastic Beanstalk runtime port (PORT var)
+// EB FIX #1 → Bind to Elastic Beanstalk runtime port
 // ------------------------------------------------------------
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,67 +22,12 @@ Console.WriteLine($"Elastic Beanstalk PORT = {port}");
 builder.WebHost.UseUrls($"http://*:{port}");
 
 // ------------------------------------------------------------
-// Read AWS settings (AccessKey/SecretKey are OPTIONAL on EB)
+// CLEAN & SAFE SERILOG (NO CLOUDWATCH)
 // ------------------------------------------------------------
-var awsAccessKey = builder.Configuration["AWS:AccessKey"];
-var awsSecretKey = builder.Configuration["AWS:SecretKey"];
-var awsRegion = builder.Configuration["AWS:Region"];
-
-// ------------------------------------------------------------
-// Configure Serilog
-// ------------------------------------------------------------
-var writeTo = builder.Configuration["Logging:WriteTo"];
-var loggerConfig = new LoggerConfiguration().MinimumLevel.Debug();
-
-switch (writeTo)
-{
-    case "Console":
-        loggerConfig.WriteTo.Console();
-        break;
-
-    case "File":
-        // EB FIX → Linux path instead of Windows
-        loggerConfig.WriteTo.File(
-            "/var/log/app-log.txt",
-            rollingInterval: RollingInterval.Day,
-            restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information
-        );
-        break;
-
-    case "Database":
-        var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-        loggerConfig.WriteTo.MSSqlServer(
-            connectionString: connectionString,
-            sinkOptions: new MSSqlServerSinkOptions
-            {
-                TableName = "Logs",
-                AutoCreateSqlTable = true
-            },
-            restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Information
-        );
-        break;
-
-    case "CloudWatch":
-        // EB FIX #2 → Use instance profile (IAM role) NOT AccessKey in JSON
-        var cwClient = new AmazonCloudWatchLogsClient(
-            RegionEndpoint.GetBySystemName(awsRegion)
-        );
-
-        var cloudWatchOptions = new CloudWatchSinkOptions
-        {
-            LogGroupName = "AuthAPI-Logs",
-            LogStreamNameProvider = new DefaultLogStreamProvider(),
-            MinimumLogEventLevel = Serilog.Events.LogEventLevel.Information,
-            CreateLogGroup = true
-        };
-
-        loggerConfig.WriteTo.AmazonCloudWatch(cloudWatchOptions, cwClient);
-        break;
-
-    default:
-        loggerConfig.WriteTo.Console();
-        break;
-}
+var loggerConfig = new LoggerConfiguration()
+    .MinimumLevel.Debug()
+    .WriteTo.Console()
+    .WriteTo.File("/var/log/app-log.txt", rollingInterval: RollingInterval.Day);
 
 Log.Logger = loggerConfig.CreateLogger();
 builder.Host.UseSerilog();
@@ -127,10 +72,10 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // ------------------------------------------------------------
-// Database
+// Database (fixed path for Linux)
 // ------------------------------------------------------------
 builder.Services.AddDbContext<AppDBContext>(options =>
-    options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseSqlite("DataSource=/var/app/current/appdata.db"));
 
 // ------------------------------------------------------------
 // Identity
@@ -156,9 +101,7 @@ builder.Services.AddAuthentication(options =>
 })
 .AddJwtBearer(options =>
 {
-    // EB FIX #3 → Disable HTTPS metadata requirement
-    options.RequireHttpsMetadata = false;
-
+    options.RequireHttpsMetadata = false; // EB FIX
     options.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
@@ -174,30 +117,30 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<IEmailService, EmailService>();
 
 // ------------------------------------------------------------
-// Build application
+// Build app
 // ------------------------------------------------------------
 var app = builder.Build();
 
-// Swagger
+// Swagger (always enabled)
 app.UseSwagger();
 app.UseSwaggerUI();
 
 // ------------------------------------------------------------
-// EB FIX #4 → Disable HTTPS redirection on EB
-// EB ALB terminates HTTPS, backend MUST accept HTTP
+// EB FIX → disable HTTPS redirection on Elastic Beanstalk
+// (HTTPS is terminated at the load balancer)
 // ------------------------------------------------------------
 if (app.Environment.IsDevelopment())
 {
-    app.UseHttpsRedirection(); // only for local
+    app.UseHttpsRedirection();
 }
 
-// Authentication/Authorization
 app.UseAuthentication();
 app.UseAuthorization();
+
 app.MapControllers();
 
 // ------------------------------------------------------------
-// EB FIX #5 → Root & Health endpoints
+// Root & Health endpoints
 // ------------------------------------------------------------
 app.MapGet("/", () => "API is running on Elastic Beanstalk");
 app.MapGet("/health", () => Results.Ok("Healthy"));
