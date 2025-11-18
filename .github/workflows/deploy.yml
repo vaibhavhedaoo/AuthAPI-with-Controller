@@ -96,7 +96,7 @@ jobs:
                 ]
               }'
 
-            # FIXED POLICIES — WORKING VERSION
+            # Correct policies
             aws iam attach-role-policy \
               --role-name aws-elasticbeanstalk-service-role \
               --policy-arn arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkService
@@ -157,7 +157,7 @@ jobs:
 
           echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
 
-      # 13. Create or Update EB environment
+      # 13. Create or Update EB Environment  (FIXED BLOCK)
       - name: Create or Update EB Environment
         env:
           PLATFORM_ARN: "${{ env.PLATFORM_ARN }}"
@@ -172,7 +172,8 @@ jobs:
             --query "Environments[0].EnvironmentName" \
             --output text 2>/dev/null)
 
-          if [ "$ENV_EXISTS" = "None" ]; then
+          # FIXED CHECK
+          if [ -z "$ENV_EXISTS" ] || [ "$ENV_EXISTS" = "None" ]; then
             echo "Creating EB environment..."
             aws elasticbeanstalk create-environment \
               --application-name "$APP_NAME" \
