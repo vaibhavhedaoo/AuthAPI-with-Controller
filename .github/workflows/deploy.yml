@@ -31,6 +31,10 @@ jobs:
       # 5. Publish
       - name: Publish
         run: dotnet publish -c Release -o publish
+      
+      # 5.1 add ebextensions
+      - name: Copy .ebextensions
+        run: cp -r .ebextensions publish/
 
       # 6. Zip published files
       - name: Zip publish folder
