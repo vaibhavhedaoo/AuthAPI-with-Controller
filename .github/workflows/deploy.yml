@@ -125,9 +125,11 @@ jobs:
       # ----------------------------------------------------
       # Create EB Application Version + Deploy
       # ----------------------------------------------------
-      - name: Upload to S3
-        run: |
-          aws s3 cp deploy.zip s3://your-bucket-name/deploy.zip
+        - name: Upload to S3
+            run: |
+            BUCKET="sample-auth-api-${{ secrets.AWS_ACCOUNT_ID }}"
+            echo "Uploading to $BUCKET"
+            aws s3 cp deploy.zip s3://$BUCKET/deploy.zip
 
       - name: Create application version
         run: |
