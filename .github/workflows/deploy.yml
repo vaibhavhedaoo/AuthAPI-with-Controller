@@ -70,7 +70,7 @@ jobs:
             aws iam attach-role-policy --role-name aws-elasticbeanstalk-ec2-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
           fi
 
-          # Instance Profile creation
+          # Instance Profile
           if ! aws iam get-instance-profile --instance-profile-name aws-elasticbeanstalk-ec2-role >/dev/null 2>&1; then
             echo "Creating instance profile..."
             aws iam create-instance-profile --instance-profile-name aws-elasticbeanstalk-ec2-role
@@ -81,7 +81,7 @@ jobs:
 
           # Service Role
           if ! aws iam get-role --role-name aws-elasticbeanstalk-service-role >/dev/null 2>&1; then
-            echo "Creating service role..."
+            echo "Creating EB service role..."
 
             aws iam create-role \
               --role-name aws-elasticbeanstalk-service-role \
@@ -96,7 +96,6 @@ jobs:
                 ]
               }'
 
-            # Correct policies
             aws iam attach-role-policy \
               --role-name aws-elasticbeanstalk-service-role \
               --policy-arn arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkService
@@ -146,7 +145,7 @@ jobs:
               --auto-create-application
           fi
 
-      # 12. Determine latest .NET Linux 2 Platform ARN
+      # 12. Determine latest .NET Platform ARN
       - name: Determine latest .NET AL2 Platform ARN
         id: get_platform
         run: |
@@ -157,7 +156,9 @@ jobs:
 
           echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
 
-      # 13. Create or Update EB Environment  (FIXED BLOCK)
+      # ----------------------------------------------------
+      # 13. CREATE OR UPDATE EB ENVIRONMENT (FINAL FIX)
+      # ----------------------------------------------------
       - name: Create or Update EB Environment
         env:
           PLATFORM_ARN: "${{ env.PLATFORM_ARN }}"
@@ -166,15 +167,20 @@ jobs:
           APP_NAME="Sample-AUTH-API"
           ENV_NAME="development"
 
-          ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
+          # Returns [] when environment does NOT exist
+          ENV_JSON=$(aws elasticbeanstalk describe-environments \
             --application-name "$APP_NAME" \
             --environment-names "$ENV_NAME" \
-            --query "Environments[0].EnvironmentName" \
-            --output text 2>/dev/null)
+            --no-include-deleted \
+            --query "Environments" \
+            --output json 2>/dev/null)
 
-          # FIXED CHECK
-          if [ -z "$ENV_EXISTS" ] || [ "$ENV_EXISTS" = "None" ]; then
-            echo "Creating EB environment..."
+          ENV_COUNT=$(echo "$ENV_JSON" | jq 'length')
+
+          echo "Environment count = $ENV_COUNT"
+
+          if [ "$ENV_COUNT" -eq 0 ]; then
+            echo "Environment does NOT exist → Creating..."
             aws elasticbeanstalk create-environment \
               --application-name "$APP_NAME" \
               --environment-name "$ENV_NAME" \
@@ -182,7 +188,7 @@ jobs:
               --version-label "$VERSION_LABEL" \
               --option-settings Namespace=aws:autoscaling:launchconfiguration,OptionName=IamInstanceProfile,Value=aws-elasticbeanstalk-ec2-role
           else
-            echo "Updating EB environment..."
+            echo "Environment exists → Updating..."
             aws elasticbeanstalk update-environment \
               --environment-name "$ENV_NAME" \
               --version-label "$VERSION_LABEL"
