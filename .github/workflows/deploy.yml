@@ -3,7 +3,7 @@
 on:
   push:
     branches:
-      - main
+      - common-devlopement
 
 jobs:
   deploy:
