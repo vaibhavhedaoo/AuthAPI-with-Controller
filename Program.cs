@@ -13,15 +13,16 @@ using Serilog.Sinks.MSSqlServer;
 using System.Text;
 
 // ------------------------------------------------------------
-// EB FIX #1 → Bind to PORT provided by Elastic Beanstalk
+// EB FIX #1 → Bind to Elastic Beanstalk runtime port (PORT var)
 // ------------------------------------------------------------
 var builder = WebApplication.CreateBuilder(args);
 
 var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
+Console.WriteLine($"Elastic Beanstalk PORT = {port}");
 builder.WebHost.UseUrls($"http://*:{port}");
 
 // ------------------------------------------------------------
-// Read AWS settings
+// Read AWS settings (AccessKey/SecretKey are OPTIONAL on EB)
 // ------------------------------------------------------------
 var awsAccessKey = builder.Configuration["AWS:AccessKey"];
 var awsSecretKey = builder.Configuration["AWS:SecretKey"];
@@ -31,8 +32,7 @@ var awsRegion = builder.Configuration["AWS:Region"];
 // Configure Serilog
 // ------------------------------------------------------------
 var writeTo = builder.Configuration["Logging:WriteTo"];
-var loggerConfig = new LoggerConfiguration()
-    .MinimumLevel.Debug();
+var loggerConfig = new LoggerConfiguration().MinimumLevel.Debug();
 
 switch (writeTo)
 {
@@ -41,7 +41,7 @@ switch (writeTo)
         break;
 
     case "File":
-        // EB is Linux, so use Linux file path
+        // EB FIX → Linux path instead of Windows
         loggerConfig.WriteTo.File(
             "/var/log/app-log.txt",
             rollingInterval: RollingInterval.Day,
@@ -63,10 +63,7 @@ switch (writeTo)
         break;
 
     case "CloudWatch":
-        // ------------------------------------------------------------
-        // EB FIX #2 → Use IAM Role instead of appsettings Access Keys
-        // EB supplies SDK credentials automatically via Instance Role
-        // ------------------------------------------------------------
+        // EB FIX #2 → Use instance profile (IAM role) NOT AccessKey in JSON
         var cwClient = new AmazonCloudWatchLogsClient(
             RegionEndpoint.GetBySystemName(awsRegion)
         );
@@ -87,12 +84,11 @@ switch (writeTo)
         break;
 }
 
-// Set Serilog as the logging provider
 Log.Logger = loggerConfig.CreateLogger();
 builder.Host.UseSerilog();
 
 // ------------------------------------------------------------
-// Add Services
+// Services
 // ------------------------------------------------------------
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -111,7 +107,7 @@ builder.Services.AddSwaggerGen(c =>
         Scheme = "Bearer",
         BearerFormat = "JWT",
         In = Microsoft.OpenApi.Models.ParameterLocation.Header,
-        Description = "Enter your JWT token as: Bearer <token>"
+        Description = "Enter token as: Bearer <token>"
     });
 
     c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
@@ -160,7 +156,7 @@ builder.Services.AddAuthentication(options =>
 })
 .AddJwtBearer(options =>
 {
-    // EB uses HTTP by default → disable HTTPS metadata
+    // EB FIX #3 → Disable HTTPS metadata requirement
     options.RequireHttpsMetadata = false;
 
     options.TokenValidationParameters = new TokenValidationParameters
@@ -178,21 +174,30 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<IEmailService, EmailService>();
 
 // ------------------------------------------------------------
-// Build & Run
+// Build application
 // ------------------------------------------------------------
 var app = builder.Build();
 
+// Swagger
 app.UseSwagger();
 app.UseSwaggerUI();
 
-app.UseHttpsRedirection();
+// ------------------------------------------------------------
+// EB FIX #4 → Disable HTTPS redirection on EB
+// EB ALB terminates HTTPS, backend MUST accept HTTP
+// ------------------------------------------------------------
+if (app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection(); // only for local
+}
+
+// Authentication/Authorization
 app.UseAuthentication();
 app.UseAuthorization();
-
 app.MapControllers();
 
 // ------------------------------------------------------------
-// EB FIX #3 → Health & Root Endpoints
+// EB FIX #5 → Root & Health endpoints
 // ------------------------------------------------------------
 app.MapGet("/", () => "API is running on Elastic Beanstalk");
 app.MapGet("/health", () => Results.Ok("Healthy"));
