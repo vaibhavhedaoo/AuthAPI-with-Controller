@@ -46,7 +46,61 @@ jobs:
           echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
 
-      # 8. Ensure S3 bucket exists
+      # 8. Ensure EB IAM ROLES + INSTANCE PROFILE exist
+      - name: Ensure IAM Roles for Elastic Beanstalk exist
+        run: |
+          # Instance Role
+          if ! aws iam get-role --role-name aws-elasticbeanstalk-ec2-role >/dev/null 2>&1; then
+            echo "Creating aws-elasticbeanstalk-ec2-role..."
+
+            aws iam create-role \
+              --role-name aws-elasticbeanstalk-ec2-role \
+              --assume-role-policy-document '{
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Principal": { "Service": "ec2.amazonaws.com" },
+                    "Action": "sts:AssumeRole"
+                  }
+                ]
+              }'
+
+            aws iam attach-role-policy --role-name aws-elasticbeanstalk-ec2-role --policy-arn arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+            aws iam attach-role-policy --role-name aws-elasticbeanstalk-ec2-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+          fi
+
+          # Instance Profile creation
+          if ! aws iam get-instance-profile --instance-profile-name aws-elasticbeanstalk-ec2-role >/dev/null 2>&1; then
+            echo "Creating instance profile..."
+            aws iam create-instance-profile --instance-profile-name aws-elasticbeanstalk-ec2-role
+            aws iam add-role-to-instance-profile \
+              --instance-profile-name aws-elasticbeanstalk-ec2-role \
+              --role-name aws-elasticbeanstalk-ec2-role
+          fi
+
+          # Service Role
+          if ! aws iam get-role --role-name aws-elasticbeanstalk-service-role >/dev/null 2>&1; then
+            echo "Creating service role..."
+
+            aws iam create-role \
+              --role-name aws-elasticbeanstalk-service-role \
+              --assume-role-policy-document '{
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Principal": { "Service": "elasticbeanstalk.amazonaws.com" },
+                    "Action": "sts:AssumeRole"
+                  }
+                ]
+              }'
+
+            aws iam attach-role-policy --role-name aws-elasticbeanstalk-service-role --policy-arn arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy
+            aws iam attach-role-policy --role-name aws-elasticbeanstalk-service-role --policy-arn arn:aws:iam::aws:policy/AWSElasticBeanstalkEnhancedHealth
+          fi
+
+      # 9. Ensure S3 bucket exists
       - name: Ensure S3 Bucket Exists
         run: |
           APP_NAME="Sample-AUTH-API"
@@ -57,14 +111,14 @@ jobs:
             aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
           echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
 
-      # 9. Upload zip to S3 with unique version label
+      # 10. Upload zip to S3
       - name: Upload to S3
         run: |
           VERSION_LABEL="v${GITHUB_RUN_NUMBER}-$(date +%Y%m%d%H%M%S)"
           aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
           echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      # 10. Create EB Application Version
+      # 11. Create EB Application Version
       - name: Create EB Application Version
         run: |
           APP_NAME="Sample-AUTH-API"
@@ -72,7 +126,6 @@ jobs:
           BUCKET_NAME="${{ env.BUCKET_NAME }}"
           ZIP_FILE="$VERSION_LABEL.zip"
 
-          # Check if version already exists
           VERSION_EXISTS=$(aws elasticbeanstalk describe-application-versions \
             --application-name "$APP_NAME" \
             --version-labels "$VERSION_LABEL" \
@@ -85,11 +138,9 @@ jobs:
               --version-label "$VERSION_LABEL" \
               --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$ZIP_FILE" \
               --auto-create-application
-          else
-            echo "Application version $VERSION_LABEL already exists, skipping creation."
           fi
 
-      # 11. Determine latest .NET AL2 Platform ARN
+      # 12. Determine latest .NET Linux 2 Platform ARN
       - name: Determine latest .NET AL2 Platform ARN
         id: get_platform
         run: |
@@ -98,28 +149,16 @@ jobs:
             --query "sort_by(PlatformSummaryList[?contains(PlatformArn,'Linux 2')], &PlatformVersion)[-1].PlatformArn" \
             --output text)
 
-          if [ -z "$PLATFORM_ARN" ] || [ "$PLATFORM_ARN" = "None" ]; then
-            echo "ERROR: Could not find a valid .NET AL2 platform ARN"
-            exit 1
-          fi
-
-          echo "Using PLATFORM_ARN=$PLATFORM_ARN"
           echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
 
-      # 12. Create or update EB environment
+      # 13. Create or Update EB environment
       - name: Create or Update EB Environment
         env:
           PLATFORM_ARN: "${{ env.PLATFORM_ARN }}"
           VERSION_LABEL: "${{ env.VERSION_LABEL }}"
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          BUCKET_NAME: sample-auth-api-${{ secrets.AWS_ACCOUNT_ID }}
         run: |
           APP_NAME="Sample-AUTH-API"
           ENV_NAME="development"
-          VERSION_LABEL="${VERSION_LABEL}"
-          PLATFORM_ARN="${PLATFORM_ARN}"
 
           ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
             --application-name "$APP_NAME" \
@@ -127,13 +166,14 @@ jobs:
             --query "Environments[0].EnvironmentName" \
             --output text 2>/dev/null)
 
-          if [ -z "$ENV_EXISTS" ] || [ "$ENV_EXISTS" = "None" ]; then
+          if [ "$ENV_EXISTS" = "None" ]; then
             echo "Creating EB environment..."
             aws elasticbeanstalk create-environment \
               --application-name "$APP_NAME" \
               --environment-name "$ENV_NAME" \
               --platform-arn "$PLATFORM_ARN" \
-              --version-label "$VERSION_LABEL"
+              --version-label "$VERSION_LABEL" \
+              --option-settings Namespace=aws:autoscaling:launchconfiguration,OptionName=IamInstanceProfile,Value=aws-elasticbeanstalk-ec2-role
           else
             echo "Updating EB environment..."
             aws elasticbeanstalk update-environment \
