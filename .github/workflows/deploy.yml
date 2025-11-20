@@ -67,7 +67,7 @@ jobs:
           if [ "$FUNC_TYPE" = "Image" ]; then
             echo "Function is already container-based."
             # Always update memory and timeout for best performance
-            aws lambda update-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --timeout 30 --memory-size 1024 --region "$AWS_REGION"
+            aws lambda update-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --timeout 30 --memory-size 2048 --region "$AWS_REGION"
           else
             if [ "$FUNC_TYPE" = "Zip" ]; then
               echo "Function is zip-based. Deleting so it can be re-created as container-based."
@@ -82,7 +82,7 @@ jobs:
               --role "$LAMBDA_ROLE_ARN" \
               --code ImageUri="${ECR_REPO}:${GITHUB_SHA}" \
               --timeout 30 \
-              --memory-size 1024 \
+              --memory-size 2048 \
               --region "$AWS_REGION"
             # Wait for function to become Active
             echo "Waiting for Lambda function to become Active..."
@@ -148,7 +148,7 @@ jobs:
             exit 1
           fi
           aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --image-uri "${ECR_REPO}:${GITHUB_SHA}" --region "$AWS_REGION"
-          aws lambda update-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --timeout 30 --memory-size 1024 --region "$AWS_REGION"
+          aws lambda update-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --timeout 30 --memory-size 2048 --region "$AWS_REGION"
 
       - name: Publish new Lambda version
         env:
