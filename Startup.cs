@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
+using System;
 using System.Text;
 using AuthAPIwithController.Models;
 using AuthService.Data;
@@ -31,8 +32,21 @@ public class Startup
         services.AddEndpointsApiExplorer();
         services.AddSwaggerGen();
 
-        services.AddDbContext<AppDBContext>(options =>
-            options.UseSqlite("DataSource=/tmp/appdata.db"));
+        // Detect if running in AWS Lambda
+        var isLambda = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME"));
+
+        if (isLambda)
+        {
+            // Use in-memory DB in Lambda to avoid native sqlite dependency issues
+            services.AddDbContext<AppDBContext>(options =>
+                options.UseInMemoryDatabase("AuthDb"));
+        }
+        else
+        {
+            // Use SQLite on disk for local / Elastic Beanstalk
+            services.AddDbContext<AppDBContext>(options =>
+                options.UseSqlite("DataSource=/var/app/current/appdata.db"));
+        }
 
         services.AddIdentity<User, IdentityRole>()
             .AddEntityFrameworkStores<AppDBContext>()
@@ -41,24 +55,32 @@ public class Startup
         var jwtKey = Configuration["Jwt:Key"];
         var jwtIssuer = Configuration["Jwt:Issuer"];
 
-        services.AddAuthentication(options =>
+        if (!string.IsNullOrEmpty(jwtKey))
         {
-            options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-            options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-        })
-        .AddJwtBearer(options =>
-        {
-            options.RequireHttpsMetadata = false;
-            options.TokenValidationParameters = new TokenValidationParameters
+            services.AddAuthentication(options =>
             {
-                ValidateIssuer = true,
-                ValidateAudience = false,
-                ValidateLifetime = true,
-                ValidateIssuerSigningKey = true,
-                ValidIssuer = jwtIssuer,
-                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey ?? string.Empty))
-            };
-        });
+                options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+                options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+            })
+            .AddJwtBearer(options =>
+            {
+                options.RequireHttpsMetadata = false;
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidateAudience = false,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    ValidIssuer = jwtIssuer,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+                };
+            });
+        }
+        else
+        {
+            // Log a clear warning — if you're running without JWT configured, endpoints will be unprotected
+            Log.Warning("Jwt:Key not configured. Skipping JWT authentication setup.");
+        }
 
         services.AddAuthorization();
         services.AddScoped<IEmailService, EmailService>();
@@ -84,32 +106,40 @@ public class Startup
             }
         });
 
-        // Log startup diagnostic info
+        // Log startup diagnostic info and apply migrations only when not running in Lambda
+        var isLambda = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME"));
+
         try
         {
             var jwtKey = Configuration["Jwt:Key"];
-            logger.LogInformation("Startup: Environment={Environment}, JwtKeyPresent={HasJwt}", env.EnvironmentName, !string.IsNullOrEmpty(jwtKey));
+            logger.LogInformation("Startup: Environment={Environment}, JwtKeyPresent={HasJwt}, IsLambda={IsLambda}", env.EnvironmentName, !string.IsNullOrEmpty(jwtKey), isLambda);
 
-            // Apply EF migrations (SQLite file at /tmp/appdata.db in Lambda)
-            using (var scope = app.ApplicationServices.CreateScope())
+            if (!isLambda)
             {
-                var db = scope.ServiceProvider.GetService<AppDBContext>();
-                if (db != null)
+                using (var scope = app.ApplicationServices.CreateScope())
                 {
-                    try
+                    var db = scope.ServiceProvider.GetService<AppDBContext>();
+                    if (db != null)
                     {
-                        db.Database.Migrate();
-                        logger.LogInformation("Database migrations applied. DB path=/tmp/appdata.db");
+                        try
+                        {
+                            db.Database.Migrate();
+                            logger.LogInformation("Database migrations applied. DB path=/var/app/current/appdata.db");
+                        }
+                        catch (Exception mex)
+                        {
+                            logger.LogError(mex, "Error applying database migrations");
+                        }
                     }
-                    catch (Exception mex)
+                    else
                     {
-                        logger.LogError(mex, "Error applying database migrations");
+                        logger.LogWarning("AppDBContext not registered; skipping migrations");
                     }
                 }
-                else
-                {
-                    logger.LogWarning("AppDBContext not registered; skipping migrations");
-                }
+            }
+            else
+            {
+                logger.LogInformation("Running in Lambda; using InMemory database at runtime");
             }
         }
         catch (Exception ex)
@@ -126,7 +156,14 @@ public class Startup
         app.UseSwaggerUI();
 
         app.UseRouting();
-        app.UseAuthentication();
+
+        // Only enable authentication middleware if Jwt is configured
+        var jwtConfigured = !string.IsNullOrEmpty(Configuration["Jwt:Key"]);
+        if (jwtConfigured)
+        {
+            app.UseAuthentication();
+        }
+
         app.UseAuthorization();
 
         app.UseEndpoints(endpoints =>

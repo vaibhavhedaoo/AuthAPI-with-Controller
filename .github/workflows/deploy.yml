@@ -161,6 +161,37 @@ jobs:
             echo "Updated integration for API $EXISTING_API_ID"
           fi
 
+      - name: Ensure role has CloudWatch permissions (optional)
+        if: ${{ secrets.ALLOW_ROLE_ATTACH == 'true' }}
+        env:
+          ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          if [ -z "$ROLE_ARN" ]; then
+            echo "No LAMBDA_ROLE_ARN provided; skipping role attach step"
+            exit 0
+          fi
+          # extract role name from ARN
+          ROLE_NAME=$(echo "$ROLE_ARN" | awk -F'/' '{print $NF}')
+          echo "Checking attached policies for role: $ROLE_NAME"
+          HAS_POLICY=$(aws iam list-attached-role-policies --role-name "$ROLE_NAME" --query "AttachedPolicies[?PolicyArn=='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'] | length(@)" --output text || echo "0")
+          if [ "$HAS_POLICY" = "0" ]; then
+            echo "Attaching AWSLambdaBasicExecutionRole to $ROLE_NAME"
+            aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          else
+            echo "Role already has AWSLambdaBasicExecutionRole"
+          fi
+
+      - name: CloudWatch diagnostics - list log groups for Lambda
+        env:
+          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          echo "Listing CloudWatch log groups with prefix /aws/lambda/$LAMBDA_FUNCTION_NAME"
+          aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/$LAMBDA_FUNCTION_NAME" --region "$AWS_REGION" || true
+          echo "Show recent log streams (if any)"
+          aws logs describe-log-streams --log-group-name "/aws/lambda/$LAMBDA_FUNCTION_NAME" --order-by LastEventTime --descending --limit 5 --region "$AWS_REGION" || true
+
       - name: Cleanup artifact
         run: rm -f app.zip
 
