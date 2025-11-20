@@ -11,6 +11,8 @@ using Serilog;
 using System.Text;
 using AuthAPIwithController.Models;
 using AuthService.Data;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 
 namespace AuthAPIwithController;
 
@@ -54,7 +56,7 @@ public class Startup
                 ValidateLifetime = true,
                 ValidateIssuerSigningKey = true,
                 ValidIssuer = jwtIssuer,
-                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey ?? string.Empty))
             };
         });
 
@@ -62,8 +64,59 @@ public class Startup
         services.AddScoped<IEmailService, EmailService>();
     }
 
-    public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+    public void Configure(IApplicationBuilder app, IWebHostEnvironment env, ILogger<Startup> logger)
     {
+        // Serilog request logging (captures request details)
+        app.UseSerilogRequestLogging();
+
+        // Global exception handler to ensure exceptions are logged to CloudWatch
+        app.Use(async (context, next) =>
+        {
+            try
+            {
+                await next();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Unhandled exception processing request");
+                context.Response.StatusCode = 500;
+                await context.Response.WriteAsync("Internal Server Error");
+            }
+        });
+
+        // Log startup diagnostic info
+        try
+        {
+            var jwtKey = Configuration["Jwt:Key"];
+            logger.LogInformation("Startup: Environment={Environment}, JwtKeyPresent={HasJwt}", env.EnvironmentName, !string.IsNullOrEmpty(jwtKey));
+
+            // Apply EF migrations (SQLite file at /tmp/appdata.db in Lambda)
+            using (var scope = app.ApplicationServices.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetService<AppDBContext>();
+                if (db != null)
+                {
+                    try
+                    {
+                        db.Database.Migrate();
+                        logger.LogInformation("Database migrations applied. DB path=/tmp/appdata.db");
+                    }
+                    catch (Exception mex)
+                    {
+                        logger.LogError(mex, "Error applying database migrations");
+                    }
+                }
+                else
+                {
+                    logger.LogWarning("AppDBContext not registered; skipping migrations");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error during startup diagnostics");
+        }
+
         if (env.IsDevelopment())
         {
             app.UseDeveloperExceptionPage();
