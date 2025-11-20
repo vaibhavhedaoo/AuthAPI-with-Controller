@@ -82,6 +82,21 @@ jobs:
               --timeout 30 \
               --memory-size 512 \
               --region "$AWS_REGION"
+            # Wait for function to become Active
+            echo "Waiting for Lambda function to become Active..."
+            for i in {1..30}; do
+              STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
+              echo "Current state: $STATUS"
+              if [ "$STATUS" = "Active" ]; then
+                break
+              fi
+              sleep 5
+            done
+            STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
+            if [ "$STATUS" != "Active" ]; then
+              echo "Lambda function did not become Active in time. Current state: $STATUS"
+              exit 1
+            fi
           fi
 
       - name: Update Lambda to use new image
