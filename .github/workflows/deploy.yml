@@ -7,14 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Select deployment environment'
+        description: 'Select deployment environment (development, staging, production)'
         required: true
         default: 'development'
-        type: choice
-        options:
-          - development
-          - staging
-          - production
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -24,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      ENVTYPE: ${{ github.event.inputs.environment }}
+      ENVTYPE: ${{ github.event.inputs.environment || 'development' }}
 
     steps:
       - name: Checkout
@@ -35,10 +34,12 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Install Amazon.Lambda.Tools global tool
-        run: dotnet tool install -g Amazon.Lambda.Tools --version 6.1.0 || true
+      - name: Install tools
+        run: |
+          dotnet tool install -g Amazon.Lambda.Tools --version 6.1.0 || true
+          export PATH="$PATH:$HOME/.dotnet/tools"
 
-      - name: Restore dependencies
+      - name: Restore
         run: dotnet restore
 
       - name: Build
@@ -49,6 +50,7 @@ jobs:
 
       - name: Create deployment zip
         run: |
+          rm -f app.zip
           cd publish
           zip -r ../app.zip .
           cd ..
@@ -60,140 +62,107 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Ensure LAMBDA_FUNCTION_NAME secret exists
+      - name: Validate required secrets
         run: |
-          if [ -z "${{ secrets.LAMBDA_FUNCTION_NAME }}" ]; then
-            echo "ERROR: secret LAMBDA_FUNCTION_NAME is required";
-            exit 1;
-          fi
+          if [ -z "${{ secrets.AWS_REGION }}" ]; then echo "Missing AWS_REGION"; exit 1; fi
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then echo "Missing AWS_ACCESS_KEY_ID"; exit 1; fi
+          if [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "Missing AWS_SECRET_ACCESS_KEY"; exit 1; fi
+          if [ -z "${{ secrets.LAMBDA_FUNCTION_NAME }}" ]; then echo "Missing LAMBDA_FUNCTION_NAME (set repository secret)"; exit 1; fi
 
-      - name: Create IAM role for Lambda (optional)
+      - name: Ensure S3 bucket for artifacts exists (optional)
         env:
-          ROLE_NAME: "${{ secrets.LAMBDA_FUNCTION_NAME }}-exec-role"
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          LAMBDA_ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
+          APP_NAME: Sample-AUTH-API
         run: |
-          APP_NAME="Sample-AUTH-API"
           APP_NAME_LC=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
           BUCKET_NAME="${APP_NAME_LC}-${{ secrets.AWS_ACCOUNT_ID }}"
           echo "Using bucket: $BUCKET_NAME"
-          aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || \
-            aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
+          aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || aws s3 mb "s3://$BUCKET_NAME" --region "${{ secrets.AWS_REGION }}"
           echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
 
-          if [ -z "$LAMBDA_ROLE_ARN" ]; then
-            echo "No LAMBDA_ROLE_ARN provided. Please create a role manually or provide one in secrets. This workflow will not auto-create roles by default for safety.";
-            # do not exit here; allow later step to create function if role provided
-          else
-            echo "LAMBDA_ROLE_ARN provided: $LAMBDA_ROLE_ARN"
-          fi
+      - name: Upload artifact to S3 (optional)
+        if: env.BUCKET_NAME
+        run: |
+          VERSION_LABEL="v${GITHUB_RUN_NUMBER}-$(date +%Y%m%d%H%M%S)"
+          aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
+          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      - name: Update Lambda function code (create if missing)
+      - name: Create or update Lambda function
         env:
           LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
           LAMBDA_ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
-          echo "Checking for existing Lambda function: $LAMBDA_FUNCTION_NAME"
+          set -e
+          echo "Checking Lambda function: $LAMBDA_FUNCTION_NAME"
           if aws lambda get-function --function-name "$LAMBDA_FUNCTION_NAME" >/dev/null 2>&1; then
-            echo "Function exists, updating code"
+            echo "Function exists — updating code"
             aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --zip-file fileb://app.zip
           else
             echo "Function not found"
             if [ -z "$LAMBDA_ROLE_ARN" ]; then
-              echo "LAMBDA_ROLE_ARN not provided. Cannot create Lambda function automatically. Please create the function named $LAMBDA_FUNCTION_NAME and re-run.";
+              echo "LAMBDA_ROLE_ARN not provided. Cannot create function automatically. Create the function and re-run.";
               exit 1
             fi
 
-            echo "Creating Lambda function $LAMBDA_FUNCTION_NAME using role $LAMBDA_ROLE_ARN"
+            echo "Creating Lambda function $LAMBDA_FUNCTION_NAME"
             aws lambda create-function \
               --function-name "$LAMBDA_FUNCTION_NAME" \
               --runtime provided.al2 \
               --role "$LAMBDA_ROLE_ARN" \
               --handler "AuthAPIwithController::AuthAPIwithController.LambdaEntryPoint::FunctionHandlerAsync" \
-              --zip-file fileb://app.zip || {
-                echo "Failed to create function. Ensure the role has AWSLambdaBasicExecutionRole and any other required permissions.";
-                exit 1;
-              }
+              --zip-file fileb://app.zip
           fi
 
-      - name: Publish new Lambda version (optional)
-        if: always()
+      - name: Publish new Lambda version
         env:
           LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
-        run: |
-          aws lambda publish-version --function-name "$LAMBDA_FUNCTION_NAME" || true
+        run: aws lambda publish-version --function-name "$LAMBDA_FUNCTION_NAME" || true
 
-      - name: Create or update API Gateway HTTP API pointing to Lambda (idempotent)
+      - name: Create/update API Gateway HTTP API
         env:
           LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
           ENVTYPE: ${{ env.ENVTYPE }}
         run: |
+          set -e
           FUNCTION_ARN=$(aws lambda get-function --function-name "$LAMBDA_FUNCTION_NAME" --query 'Configuration.FunctionArn' --output text)
-          if [ -z "$FUNCTION_ARN" ]; then
-            echo "Could not determine Lambda function ARN" && exit 1
-          fi
-
+          echo "Function ARN: $FUNCTION_ARN"
           API_NAME="${LAMBDA_FUNCTION_NAME}-http-api-${ENVTYPE}"
-
           EXISTING_API_ID=$(aws apigatewayv2 get-apis --query "Items[?Name=='$API_NAME'].ApiId | [0]" --output text || echo "")
 
-          if [ "$EXISTING_API_ID" = "None" ] || [ -z "$EXISTING_API_ID" ]; then
+          if [ -z "$EXISTING_API_ID" ] || [ "$EXISTING_API_ID" = "None" ]; then
             echo "Creating HTTP API $API_NAME"
             API_ID=$(aws apigatewayv2 create-api --name "$API_NAME" --protocol-type HTTP --target "$FUNCTION_ARN" --query 'ApiId' --output text)
-
             aws lambda add-permission --function-name "$LAMBDA_FUNCTION_NAME" --statement-id apigw-invoke-$API_ID --action lambda:InvokeFunction --principal apigateway.amazonaws.com --source-arn "arn:aws:execute-api:${AWS_REGION}:*:$API_ID/*/*/*" || true
-
             ENDPOINT=$(aws apigatewayv2 get-apis --query "Items[?ApiId=='$API_ID'].ApiEndpoint" --output text)
             echo "API endpoint (${ENVTYPE}): $ENDPOINT"
+            echo "API_ENDPOINT=$ENDPOINT" >> $GITHUB_ENV
           else
-            echo "API $API_NAME already exists with id $EXISTING_API_ID. Creating new integration to latest function."
+            echo "Found API $API_NAME with id $EXISTING_API_ID — creating new integration to latest function"
             INTEGRATION_URI="arn:aws:apigateway:${AWS_REGION}:lambda:path/2015-03-31/functions/$FUNCTION_ARN/invocations"
             INTEGRATION_ID=$(aws apigatewayv2 create-integration --api-id "$EXISTING_API_ID" --integration-type AWS_PROXY --integration-uri "$INTEGRATION_URI" --payload-format-version "2.0" --query 'IntegrationId' --output text)
-
             ROUTE_EXISTS=$(aws apigatewayv2 get-routes --api-id "$EXISTING_API_ID" --query 'Items[].RouteKey' --output text | grep '\$default' || true)
             if [ -z "$ROUTE_EXISTS" ]; then
               aws apigatewayv2 create-route --api-id "$EXISTING_API_ID" --route-key '$default' --target "integrations/$INTEGRATION_ID" || true
             else
               aws apigatewayv2 create-route --api-id "$EXISTING_API_ID" --route-key '$default' --target "integrations/$INTEGRATION_ID" || true
             fi
-
-            echo "Updated integration for API $EXISTING_API_ID"
+            ENDPOINT=$(aws apigatewayv2 get-apis --query "Items[?ApiId=='$EXISTING_API_ID'].ApiEndpoint" --output text)
+            echo "API endpoint (${ENVTYPE}): $ENDPOINT"
+            echo "API_ENDPOINT=$ENDPOINT" >> $GITHUB_ENV
           fi
 
-      - name: Ensure role has CloudWatch permissions (optional)
-        if: ${{ secrets.ALLOW_ROLE_ATTACH == 'true' }}
-        env:
-          ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          if [ -z "$ROLE_ARN" ]; then
-            echo "No LAMBDA_ROLE_ARN provided; skipping role attach step"
-            exit 0
-          fi
-          # extract role name from ARN
-          ROLE_NAME=$(echo "$ROLE_ARN" | awk -F'/' '{print $NF}')
-          echo "Checking attached policies for role: $ROLE_NAME"
-          HAS_POLICY=$(aws iam list-attached-role-policies --role-name "$ROLE_NAME" --query "AttachedPolicies[?PolicyArn=='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'] | length(@)" --output text || echo "0")
-          if [ "$HAS_POLICY" = "0" ]; then
-            echo "Attaching AWSLambdaBasicExecutionRole to $ROLE_NAME"
-            aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-          else
-            echo "Role already has AWSLambdaBasicExecutionRole"
-          fi
-
-      - name: CloudWatch diagnostics - list log groups for Lambda
+      - name: Ensure CloudWatch logs exist for Lambda (diagnostic)
         env:
           LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
-          echo "Listing CloudWatch log groups with prefix /aws/lambda/$LAMBDA_FUNCTION_NAME"
+          echo "Listing CloudWatch log groups for /aws/lambda/$LAMBDA_FUNCTION_NAME"
           aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/$LAMBDA_FUNCTION_NAME" --region "$AWS_REGION" || true
-          echo "Show recent log streams (if any)"
-          aws logs describe-log-streams --log-group-name "/aws/lambda/$LAMBDA_FUNCTION_NAME" --order-by LastEventTime --descending --limit 5 --region "$AWS_REGION" || true
 
-      - name: Cleanup artifact
-        run: rm -f app.zip
+      - name: Cleanup
+        run: rm -f app.zip || true
 
       - name: Done
-        run: echo "Deployment finished. If an API endpoint was created, check the previous step output for the URL."
+        run: |
+          echo "Deployment finished. API endpoint: ${{ env.API_ENDPOINT }}"
