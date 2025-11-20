@@ -32,18 +32,19 @@ public class Startup
         services.AddEndpointsApiExplorer();
         services.AddSwaggerGen();
 
-        // Detect if running in AWS Lambda
-        var isLambda = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME"));
+        // Detect if running in Lambda/container
+        var isLambda = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME")) ||
+                       !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"));
 
         if (isLambda)
         {
-            // Use in-memory DB in Lambda to avoid native sqlite dependency issues
+            // Use in-memory DB for Lambda/container
             services.AddDbContext<AppDBContext>(options =>
                 options.UseInMemoryDatabase("AuthDb"));
         }
         else
         {
-            // Use SQLite on disk for local / Elastic Beanstalk
+            // Use SQLite for local/EB
             services.AddDbContext<AppDBContext>(options =>
                 options.UseSqlite("DataSource=/var/app/current/appdata.db"));
         }
@@ -78,7 +79,6 @@ public class Startup
         }
         else
         {
-            // Log a clear warning — if you're running without JWT configured, endpoints will be unprotected
             Log.Warning("Jwt:Key not configured. Skipping JWT authentication setup.");
         }
 
@@ -88,10 +88,8 @@ public class Startup
 
     public void Configure(IApplicationBuilder app, IWebHostEnvironment env, ILogger<Startup> logger)
     {
-        // Serilog request logging (captures request details)
         app.UseSerilogRequestLogging();
 
-        // Global exception handler to ensure exceptions are logged to CloudWatch
         app.Use(async (context, next) =>
         {
             try
@@ -106,8 +104,8 @@ public class Startup
             }
         });
 
-        // Log startup diagnostic info and apply migrations only when not running in Lambda
-        var isLambda = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME"));
+        var isLambda = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME")) ||
+                       !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"));
 
         try
         {
@@ -139,7 +137,7 @@ public class Startup
             }
             else
             {
-                logger.LogInformation("Running in Lambda; using InMemory database at runtime");
+                logger.LogInformation("Running in Lambda/container; using InMemory database at runtime");
             }
         }
         catch (Exception ex)
@@ -157,7 +155,6 @@ public class Startup
 
         app.UseRouting();
 
-        // Only enable authentication middleware if Jwt is configured
         var jwtConfigured = !string.IsNullOrEmpty(Configuration["Jwt:Key"]);
         if (jwtConfigured)
         {
@@ -169,7 +166,7 @@ public class Startup
         app.UseEndpoints(endpoints =>
         {
             endpoints.MapControllers();
-            endpoints.MapGet("/", () => "API is running on Lambda");
+            endpoints.MapGet("/", () => "API is running on Lambda/Container");
             endpoints.MapGet("/health", () => Results.Ok("Healthy"));
         });
     }

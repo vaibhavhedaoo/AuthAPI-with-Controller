@@ -1,0 +1,8 @@
+bin/
+obj/
+publish/
+app.zip
+*.md
+.git
+.gitignore
+Dockerfile
