@@ -86,17 +86,19 @@ jobs:
               --region "$AWS_REGION"
             # Wait for function to become Active
             echo "Waiting for Lambda function to become Active..."
-            for i in {1..30}; do
-              STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
-              echo "Current state: $STATUS"
-              if [ "$STATUS" = "Active" ]; then
+            for i in {1..60}; do
+              STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
+              STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
+              echo "State: $STATE, LastUpdateStatus: $STATUS"
+              if [ "$STATE" = "Active" ] && [ "$STATUS" = "Successful" ]; then
                 break
               fi
               sleep 5
             done
-            STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
-            if [ "$STATUS" != "Active" ]; then
-              echo "Lambda function did not become Active in time. Current state: $STATUS"
+            STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
+            STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
+            if [ "$STATE" != "Active" ] || [ "$STATUS" != "Successful" ]; then
+              echo "Lambda function did not become Active in time. State: $STATE, LastUpdateStatus: $STATUS"
               exit 1
             fi
           fi
@@ -107,17 +109,19 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           echo "Waiting for Lambda function update to complete..."
-          for i in {1..30}; do
+          for i in {1..60}; do
+            STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
             STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
-            echo "LastUpdateStatus: $STATUS"
-            if [ "$STATUS" = "Successful" ]; then
+            echo "State: $STATE, LastUpdateStatus: $STATUS"
+            if [ "$STATE" = "Active" ] && [ "$STATUS" = "Successful" ]; then
               break
             fi
             sleep 5
           done
+          STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
           STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
-          if [ "$STATUS" != "Successful" ]; then
-            echo "Lambda function update did not complete in time. Status: $STATUS"
+          if [ "$STATE" != "Active" ] || [ "$STATUS" != "Successful" ]; then
+            echo "Lambda function update did not complete in time. State: $STATE, LastUpdateStatus: $STATUS"
             exit 1
           fi
 
@@ -127,6 +131,22 @@ jobs:
           ECR_REPO: ${{ secrets.ECR_REPO }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
+          echo "Waiting for Lambda function to be ready for update..."
+          for i in {1..60}; do
+            STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
+            STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
+            echo "State: $STATE, LastUpdateStatus: $STATUS"
+            if [ "$STATE" = "Active" ] && [ "$STATUS" = "Successful" ]; then
+              break
+            fi
+            sleep 5
+          done
+          STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
+          STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
+          if [ "$STATE" != "Active" ] || [ "$STATUS" != "Successful" ]; then
+            echo "Lambda function is not ready for update. State: $STATE, LastUpdateStatus: $STATUS"
+            exit 1
+          fi
           aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --image-uri "${ECR_REPO}:${GITHUB_SHA}" --region "$AWS_REGION"
           aws lambda update-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --timeout 30 --memory-size 1024 --region "$AWS_REGION"
 
