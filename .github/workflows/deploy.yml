@@ -59,13 +59,25 @@ jobs:
           fi
 
       - name: Create IAM role for Lambda (optional)
-        if: ${{ secrets.LAMBDA_ROLE_ARN == '' }}
         env:
           ROLE_NAME: "${{ secrets.LAMBDA_FUNCTION_NAME }}-exec-role"
           AWS_REGION: ${{ secrets.AWS_REGION }}
+          LAMBDA_ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
         run: |
-          echo "No LAMBDA_ROLE_ARN provided. Please create a role manually or provide one in secrets. This workflow will not auto-create roles by default for safety.";
-          exit 1
+          APP_NAME="Sample-AUTH-API"
+          APP_NAME_LC=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
+          BUCKET_NAME="${APP_NAME_LC}-${{ secrets.AWS_ACCOUNT_ID }}"
+          echo "Using bucket: $BUCKET_NAME"
+          aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || \
+            aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
+          echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
+
+          if [ -z "$LAMBDA_ROLE_ARN" ]; then
+            echo "No LAMBDA_ROLE_ARN provided. Please create a role manually or provide one in secrets. This workflow will not auto-create roles by default for safety.";
+            exit 1
+          else
+            echo "LAMBDA_ROLE_ARN provided: $LAMBDA_ROLE_ARN"
+          fi
 
       - name: Update Lambda function code
         env:
