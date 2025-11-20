@@ -54,12 +54,43 @@ jobs:
         run: |
           docker push ${{ secrets.ECR_REPO }}:${{ github.sha }}
 
+      - name: Ensure Lambda function is container-based
+        env:
+          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+          LAMBDA_ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
+          ECR_REPO: ${{ secrets.ECR_REPO }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -e
+          echo "Checking Lambda function: $LAMBDA_FUNCTION_NAME"
+          FUNC_TYPE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'PackageType' --output text 2>/dev/null || echo "None")
+          if [ "$FUNC_TYPE" = "Image" ]; then
+            echo "Function is already container-based."
+          else
+            if [ "$FUNC_TYPE" = "Zip" ]; then
+              echo "Function is zip-based. Deleting so it can be re-created as container-based."
+              aws lambda delete-function --function-name "$LAMBDA_FUNCTION_NAME"
+            else
+              echo "Function does not exist. Will create as container-based."
+            fi
+            echo "Creating Lambda function $LAMBDA_FUNCTION_NAME as container image."
+            aws lambda create-function \
+              --function-name "$LAMBDA_FUNCTION_NAME" \
+              --package-type Image \
+              --role "$LAMBDA_ROLE_ARN" \
+              --code ImageUri="${ECR_REPO}:${GITHUB_SHA}" \
+              --timeout 30 \
+              --memory-size 512 \
+              --region "$AWS_REGION"
+          fi
+
       - name: Update Lambda to use new image
         env:
           LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+          ECR_REPO: ${{ secrets.ECR_REPO }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
-          aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --image-uri "${{ secrets.ECR_REPO }}:${{ github.sha }}" --region "$AWS_REGION"
+          aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --image-uri "${ECR_REPO}:${GITHUB_SHA}" --region "$AWS_REGION"
 
       - name: Publish new Lambda version
         env:
