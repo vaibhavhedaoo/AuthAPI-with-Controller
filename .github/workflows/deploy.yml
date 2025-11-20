@@ -5,6 +5,16 @@ on:
     branches:
       - common-devlopement
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Select deployment environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
 
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
@@ -13,9 +23,8 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        envtype: [development, staging, production]
+    env:
+      ENVTYPE: ${{ github.event.inputs.environment }}
 
     steps:
       - name: Checkout
@@ -74,17 +83,38 @@ jobs:
 
           if [ -z "$LAMBDA_ROLE_ARN" ]; then
             echo "No LAMBDA_ROLE_ARN provided. Please create a role manually or provide one in secrets. This workflow will not auto-create roles by default for safety.";
-            exit 1
+            # do not exit here; allow later step to create function if role provided
           else
             echo "LAMBDA_ROLE_ARN provided: $LAMBDA_ROLE_ARN"
           fi
 
-      - name: Update Lambda function code
+      - name: Update Lambda function code (create if missing)
         env:
           LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+          LAMBDA_ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
         run: |
-          echo "Updating function code for $LAMBDA_FUNCTION_NAME"
-          aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --zip-file fileb://app.zip
+          echo "Checking for existing Lambda function: $LAMBDA_FUNCTION_NAME"
+          if aws lambda get-function --function-name "$LAMBDA_FUNCTION_NAME" >/dev/null 2>&1; then
+            echo "Function exists, updating code"
+            aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --zip-file fileb://app.zip
+          else
+            echo "Function not found"
+            if [ -z "$LAMBDA_ROLE_ARN" ]; then
+              echo "LAMBDA_ROLE_ARN not provided. Cannot create Lambda function automatically. Please create the function named $LAMBDA_FUNCTION_NAME and re-run.";
+              exit 1
+            fi
+
+            echo "Creating Lambda function $LAMBDA_FUNCTION_NAME using role $LAMBDA_ROLE_ARN"
+            aws lambda create-function \
+              --function-name "$LAMBDA_FUNCTION_NAME" \
+              --runtime provided.al2 \
+              --role "$LAMBDA_ROLE_ARN" \
+              --handler "AuthAPIwithController::AuthAPIwithController.LambdaEntryPoint::FunctionHandlerAsync" \
+              --zip-file fileb://app.zip || {
+                echo "Failed to create function. Ensure the role has AWSLambdaBasicExecutionRole and any other required permissions.";
+                exit 1;
+              }
+          fi
 
       - name: Publish new Lambda version (optional)
         if: always()
@@ -97,13 +127,14 @@ jobs:
         env:
           LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+          ENVTYPE: ${{ env.ENVTYPE }}
         run: |
           FUNCTION_ARN=$(aws lambda get-function --function-name "$LAMBDA_FUNCTION_NAME" --query 'Configuration.FunctionArn' --output text)
           if [ -z "$FUNCTION_ARN" ]; then
             echo "Could not determine Lambda function ARN" && exit 1
           fi
 
-          API_NAME="${LAMBDA_FUNCTION_NAME}-http-api-${{ matrix.envtype }}"
+          API_NAME="${LAMBDA_FUNCTION_NAME}-http-api-${ENVTYPE}"
 
           EXISTING_API_ID=$(aws apigatewayv2 get-apis --query "Items[?Name=='$API_NAME'].ApiId | [0]" --output text || echo "")
 
@@ -111,13 +142,13 @@ jobs:
             echo "Creating HTTP API $API_NAME"
             API_ID=$(aws apigatewayv2 create-api --name "$API_NAME" --protocol-type HTTP --target "$FUNCTION_ARN" --query 'ApiId' --output text)
 
-            aws lambda add-permission --function-name "$LAMBDA_FUNCTION_NAME" --statement-id apigw-invoke-$API_ID --action lambda:InvokeFunction --principal apigateway.amazonaws.com --source-arn "arn:aws:execute-api:${{ secrets.AWS_REGION }}:*:$API_ID/*/*/*" || true
+            aws lambda add-permission --function-name "$LAMBDA_FUNCTION_NAME" --statement-id apigw-invoke-$API_ID --action lambda:InvokeFunction --principal apigateway.amazonaws.com --source-arn "arn:aws:execute-api:${AWS_REGION}:*:$API_ID/*/*/*" || true
 
             ENDPOINT=$(aws apigatewayv2 get-apis --query "Items[?ApiId=='$API_ID'].ApiEndpoint" --output text)
-            echo "API endpoint (${{ matrix.envtype }}): $ENDPOINT"
+            echo "API endpoint (${ENVTYPE}): $ENDPOINT"
           else
             echo "API $API_NAME already exists with id $EXISTING_API_ID. Creating new integration to latest function."
-            INTEGRATION_URI="arn:aws:apigateway:${{ secrets.AWS_REGION }}:lambda:path/2015-03-31/functions/$FUNCTION_ARN/invocations"
+            INTEGRATION_URI="arn:aws:apigateway:${AWS_REGION}:lambda:path/2015-03-31/functions/$FUNCTION_ARN/invocations"
             INTEGRATION_ID=$(aws apigatewayv2 create-integration --api-id "$EXISTING_API_ID" --integration-type AWS_PROXY --integration-uri "$INTEGRATION_URI" --payload-format-version "2.0" --query 'IntegrationId' --output text)
 
             ROUTE_EXISTS=$(aws apigatewayv2 get-routes --api-id "$EXISTING_API_ID" --query 'Items[].RouteKey' --output text | grep '\$default' || true)
