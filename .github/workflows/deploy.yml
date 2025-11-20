@@ -1,4 +1,4 @@
-﻿name: Deploy ASP.NET Core API to AWS Elastic Beanstalk
+﻿name: Deploy ASP.NET Core API to AWS Lambda (API Gateway integration)
 
 on:
   push:
@@ -6,137 +6,120 @@ on:
       - common-devlopement
   workflow_dispatch:
 
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
-    steps:
-      # 1. Checkout
-      - uses: actions/checkout@v3
+    strategy:
+      matrix:
+        envtype: [development, staging, production]
 
-      # 2. Setup .NET
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '9.0.x'
 
-      # 3. Restore
+      - name: Install Amazon.Lambda.Tools global tool
+        run: dotnet tool install -g Amazon.Lambda.Tools --version 6.1.0 || true
+
       - name: Restore dependencies
         run: dotnet restore
 
-      # 4. Build
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      # 5. Publish
       - name: Publish
-        run: dotnet publish -c Release -o publish
+        run: dotnet publish -c Release -r linux-x64 --self-contained false -o publish
 
-      # ⭐ 6. Copy .ebextensions folder to publish output
-      - name: Copy .ebextensions
-        run: cp -r .ebextensions publish/
-
-      # 7. Zip publish output
-      - name: Zip publish folder
+      - name: Create deployment zip
         run: |
           cd publish
           zip -r ../app.zip .
           cd ..
 
-      # 8. Configure AWS credentials
-      - name: Configure AWS
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Ensure LAMBDA_FUNCTION_NAME secret exists
         run: |
-          echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
-          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
-
-      # 9. Ensure S3 bucket exists
-      - name: Ensure S3 Bucket Exists
-        run: |
-          APP_NAME="Sample-AUTH-API"
-          APP_NAME_LC=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
-          BUCKET_NAME="${APP_NAME_LC}-${{ secrets.AWS_ACCOUNT_ID }}"
-          echo "Using bucket: $BUCKET_NAME"
-          aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || \
-            aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
-          echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
-
-      # 10. Upload zip to S3 with version label
-      - name: Upload to S3
-        run: |
-          VERSION_LABEL="v${GITHUB_RUN_NUMBER}-$(date +%Y%m%d%H%M%S)"
-          aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
-          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
-
-      # 11. Create EB application version
-      - name: Create EB Application Version
-        run: |
-          APP_NAME="Sample-AUTH-API"
-          VERSION_LABEL="${{ env.VERSION_LABEL }}"
-          BUCKET_NAME="${{ env.BUCKET_NAME }}"
-          ZIP_FILE="$VERSION_LABEL.zip"
-
-          VERSION_EXISTS=$(aws elasticbeanstalk describe-application-versions \
-            --application-name "$APP_NAME" \
-            --version-labels "$VERSION_LABEL" \
-            --query "ApplicationVersions[0].VersionLabel" \
-            --output text)
-
-          if [ "$VERSION_EXISTS" = "None" ]; then
-            aws elasticbeanstalk create-application-version \
-              --application-name "$APP_NAME" \
-              --version-label "$VERSION_LABEL" \
-              --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$ZIP_FILE" \
-              --auto-create-application
-          else
-            echo "Application version $VERSION_LABEL already exists, skipping creation."
+          if [ -z "${{ secrets.LAMBDA_FUNCTION_NAME }}" ]; then
+            echo "ERROR: secret LAMBDA_FUNCTION_NAME is required";
+            exit 1;
           fi
 
-      # 12. Determine latest .NET AL2 platform ARN
-      - name: Determine latest .NET AL2 Platform ARN
-        id: get_platform
-        run: |
-          PLATFORM_ARN=$(aws elasticbeanstalk list-platform-versions \
-            --filters "Type=PlatformName,Operator=contains,Values=.NET" \
-            --query "sort_by(PlatformSummaryList[?contains(PlatformArn,'Linux 2')], &PlatformVersion)[-1].PlatformArn" \
-            --output text)
-
-          if [ -z "$PLATFORM_ARN" ] || [ "$PLATFORM_ARN" = "None" ]; then
-            echo "ERROR: Could not find .NET AL2 platform ARN"
-            exit 1
-          fi
-
-          echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
-
-      # 13. Create or Update EB environment
-      - name: Create or Update EB Environment
+      - name: Create IAM role for Lambda (optional)
+        if: ${{ secrets.LAMBDA_ROLE_ARN == '' }}
         env:
-          PLATFORM_ARN: ${{ env.PLATFORM_ARN }}
-          VERSION_LABEL: ${{ env.VERSION_LABEL }}
+          ROLE_NAME: "${{ secrets.LAMBDA_FUNCTION_NAME }}-exec-role"
           AWS_REGION: ${{ secrets.AWS_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          APP_NAME="Sample-AUTH-API"
-          ENV_NAME="development"
+          echo "No LAMBDA_ROLE_ARN provided. Please create a role manually or provide one in secrets. This workflow will not auto-create roles by default for safety.";
+          exit 1
 
-          ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
-            --application-name "$APP_NAME" \
-            --environment-names "$ENV_NAME" \
-            --query "Environments[0].EnvironmentName" \
-            --output text 2>/dev/null)
+      - name: Update Lambda function code
+        env:
+          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+        run: |
+          echo "Updating function code for $LAMBDA_FUNCTION_NAME"
+          aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --zip-file fileb://app.zip
 
-          if [ "$ENV_EXISTS" = "None" ]; then
-            echo "Creating EB environment..."
-            aws elasticbeanstalk create-environment \
-              --application-name "$APP_NAME" \
-              --environment-name "$ENV_NAME" \
-              --platform-arn "$PLATFORM_ARN" \
-              --version-label "$VERSION_LABEL" \
-              --option-settings Namespace=aws:autoscaling:launchconfiguration,OptionName=IamInstanceProfile,Value=aws-elasticbeanstalk-ec2-role
-          else
-            echo "Updating EB environment..."
-            aws elasticbeanstalk update-environment \
-              --environment-name "$ENV_NAME" \
-              --version-label "$VERSION_LABEL"
+      - name: Publish new Lambda version (optional)
+        if: always()
+        env:
+          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+        run: |
+          aws lambda publish-version --function-name "$LAMBDA_FUNCTION_NAME" || true
+
+      - name: Create or update API Gateway HTTP API pointing to Lambda (idempotent)
+        env:
+          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          FUNCTION_ARN=$(aws lambda get-function --function-name "$LAMBDA_FUNCTION_NAME" --query 'Configuration.FunctionArn' --output text)
+          if [ -z "$FUNCTION_ARN" ]; then
+            echo "Could not determine Lambda function ARN" && exit 1
           fi
+
+          API_NAME="${LAMBDA_FUNCTION_NAME}-http-api-${{ matrix.envtype }}"
+
+          EXISTING_API_ID=$(aws apigatewayv2 get-apis --query "Items[?Name=='$API_NAME'].ApiId | [0]" --output text || echo "")
+
+          if [ "$EXISTING_API_ID" = "None" ] || [ -z "$EXISTING_API_ID" ]; then
+            echo "Creating HTTP API $API_NAME"
+            API_ID=$(aws apigatewayv2 create-api --name "$API_NAME" --protocol-type HTTP --target "$FUNCTION_ARN" --query 'ApiId' --output text)
+
+            aws lambda add-permission --function-name "$LAMBDA_FUNCTION_NAME" --statement-id apigw-invoke-$API_ID --action lambda:InvokeFunction --principal apigateway.amazonaws.com --source-arn "arn:aws:execute-api:${{ secrets.AWS_REGION }}:*:$API_ID/*/*/*" || true
+
+            ENDPOINT=$(aws apigatewayv2 get-apis --query "Items[?ApiId=='$API_ID'].ApiEndpoint" --output text)
+            echo "API endpoint (${{ matrix.envtype }}): $ENDPOINT"
+          else
+            echo "API $API_NAME already exists with id $EXISTING_API_ID. Creating new integration to latest function."
+            INTEGRATION_URI="arn:aws:apigateway:${{ secrets.AWS_REGION }}:lambda:path/2015-03-31/functions/$FUNCTION_ARN/invocations"
+            INTEGRATION_ID=$(aws apigatewayv2 create-integration --api-id "$EXISTING_API_ID" --integration-type AWS_PROXY --integration-uri "$INTEGRATION_URI" --payload-format-version "2.0" --query 'IntegrationId' --output text)
+
+            ROUTE_EXISTS=$(aws apigatewayv2 get-routes --api-id "$EXISTING_API_ID" --query 'Items[].RouteKey' --output text | grep '\$default' || true)
+            if [ -z "$ROUTE_EXISTS" ]; then
+              aws apigatewayv2 create-route --api-id "$EXISTING_API_ID" --route-key '$default' --target "integrations/$INTEGRATION_ID" || true
+            else
+              aws apigatewayv2 create-route --api-id "$EXISTING_API_ID" --route-key '$default' --target "integrations/$INTEGRATION_ID" || true
+            fi
+
+            echo "Updated integration for API $EXISTING_API_ID"
+          fi
+
+      - name: Cleanup artifact
+        run: rm -f app.zip
+
+      - name: Done
+        run: echo "Deployment finished. If an API endpoint was created, check the previous step output for the URL."

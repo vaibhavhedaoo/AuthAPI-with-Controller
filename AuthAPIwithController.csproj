@@ -30,6 +30,8 @@
     <PackageReference Include="Serilog.Sinks.MSSqlServer" Version="9.0.2" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.8.0" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.14.0" />
+    <!-- Add AWS Lambda ASP.NET Core Server to host ASP.NET Core in Lambda -->
+    <PackageReference Include="Amazon.Lambda.AspNetCoreServer" Version="9.0.0" />
   </ItemGroup>
 
   <ItemGroup>
