@@ -1,170 +1,142 @@
-﻿name: Deploy ASP.NET Core API to AWS Lambda (Container Image)
+﻿name: Deploy ASP.NET Core API to AWS Elastic Beanstalk
 
 on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Select deployment environment (development, staging, production)'
-        required: true
-        default: 'development'
   push:
     branches:
       - common-devlopement
-
-concurrency:
-  group: deploy-${{ github.ref }}
-  cancel-in-progress: false
-
-env:
-  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      ENVTYPE: ${{ github.event.inputs.environment || 'development' }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
 
+    steps:
+      # 1. Checkout
+      - uses: actions/checkout@v3
+
+      # 2. Setup .NET
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: '9.0.x'
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+      # 3. Restore
+      - name: Restore dependencies
+        run: dotnet restore
 
-      - name: Build Docker image
-        run: |
-          docker build -t ${{ secrets.ECR_REPO }}:${{ github.sha }} .
+      # 4. Build
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
 
-      - name: Login to Amazon ECR
-        env:
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          aws --version
-          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.ECR_URI }}
+      # 5. Publish
+      - name: Publish
+        run: dotnet publish -c Release -o publish
 
-      - name: Push Docker image to ECR
-        run: |
-          docker push ${{ secrets.ECR_REPO }}:${{ github.sha }}
+      # ⭐ 6. Copy .ebextensions folder to publish output
+      - name: Copy .ebextensions
+        run: cp -r .ebextensions publish/
 
-      - name: Ensure Lambda function is container-based
-        env:
-          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
-          LAMBDA_ROLE_ARN: ${{ secrets.LAMBDA_ROLE_ARN }}
-          ECR_REPO: ${{ secrets.ECR_REPO }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
+      # 7. Zip publish output
+      - name: Zip publish folder
         run: |
-          set -e
-          echo "Checking Lambda function: $LAMBDA_FUNCTION_NAME"
-          FUNC_TYPE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'PackageType' --output text 2>/dev/null || echo "None")
-          if [ "$FUNC_TYPE" = "Image" ]; then
-            echo "Function is already container-based."
-            # Always update memory and timeout for best performance
-            aws lambda update-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --timeout 30 --memory-size 2048 --region "$AWS_REGION"
+          cd publish
+          zip -r ../app.zip .
+          cd ..
+
+      # 8. Configure AWS credentials
+      - name: Configure AWS
+        run: |
+          echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+
+      # 9. Ensure S3 bucket exists
+      - name: Ensure S3 Bucket Exists
+        run: |
+          APP_NAME="Sample-AUTH-API"
+          APP_NAME_LC=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
+          BUCKET_NAME="${APP_NAME_LC}-${{ secrets.AWS_ACCOUNT_ID }}"
+          echo "Using bucket: $BUCKET_NAME"
+          aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || \
+            aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
+          echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
+
+      # 10. Upload zip to S3 with version label
+      - name: Upload to S3
+        run: |
+          VERSION_LABEL="v${GITHUB_RUN_NUMBER}-$(date +%Y%m%d%H%M%S)"
+          aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
+          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
+
+      # 11. Create EB application version
+      - name: Create EB Application Version
+        run: |
+          APP_NAME="Sample-AUTH-API"
+          VERSION_LABEL="${{ env.VERSION_LABEL }}"
+          BUCKET_NAME="${{ env.BUCKET_NAME }}"
+          ZIP_FILE="$VERSION_LABEL.zip"
+
+          VERSION_EXISTS=$(aws elasticbeanstalk describe-application-versions \
+            --application-name "$APP_NAME" \
+            --version-labels "$VERSION_LABEL" \
+            --query "ApplicationVersions[0].VersionLabel" \
+            --output text)
+
+          if [ "$VERSION_EXISTS" = "None" ]; then
+            aws elasticbeanstalk create-application-version \
+              --application-name "$APP_NAME" \
+              --version-label "$VERSION_LABEL" \
+              --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$ZIP_FILE" \
+              --auto-create-application
           else
-            if [ "$FUNC_TYPE" = "Zip" ]; then
-              echo "Function is zip-based. Deleting so it can be re-created as container-based."
-              aws lambda delete-function --function-name "$LAMBDA_FUNCTION_NAME"
-            else
-              echo "Function does not exist. Will create as container-based."
-            fi
-            echo "Creating Lambda function $LAMBDA_FUNCTION_NAME as container image."
-            aws lambda create-function \
-              --function-name "$LAMBDA_FUNCTION_NAME" \
-              --package-type Image \
-              --role "$LAMBDA_ROLE_ARN" \
-              --code ImageUri="${ECR_REPO}:${GITHUB_SHA}" \
-              --timeout 30 \
-              --memory-size 2048 \
-              --region "$AWS_REGION"
-            # Wait for function to become Active
-            echo "Waiting for Lambda function to become Active..."
-            for i in {1..60}; do
-              STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
-              STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
-              echo "State: $STATE, LastUpdateStatus: $STATUS"
-              if [ "$STATE" = "Active" ] && [ "$STATUS" = "Successful" ]; then
-                break
-              fi
-              sleep 5
-            done
-            STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
-            STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
-            if [ "$STATE" != "Active" ] || [ "$STATUS" != "Successful" ]; then
-              echo "Lambda function did not become Active in time. State: $STATE, LastUpdateStatus: $STATUS"
-              exit 1
-            fi
+            echo "Application version $VERSION_LABEL already exists, skipping creation."
           fi
 
-      - name: Wait for previous update to complete
-        env:
-          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
+      # 12. Determine latest .NET AL2 platform ARN
+      - name: Determine latest .NET AL2 Platform ARN
+        id: get_platform
         run: |
-          echo "Waiting for Lambda function update to complete..."
-          for i in {1..60}; do
-            STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
-            STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
-            echo "State: $STATE, LastUpdateStatus: $STATUS"
-            if [ "$STATE" = "Active" ] && [ "$STATUS" = "Successful" ]; then
-              break
-            fi
-            sleep 5
-          done
-          STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
-          STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
-          if [ "$STATE" != "Active" ] || [ "$STATUS" != "Successful" ]; then
-            echo "Lambda function update did not complete in time. State: $STATE, LastUpdateStatus: $STATUS"
+          PLATFORM_ARN=$(aws elasticbeanstalk list-platform-versions \
+            --filters "Type=PlatformName,Operator=contains,Values=.NET" \
+            --query "sort_by(PlatformSummaryList[?contains(PlatformArn,'Linux 2')], &PlatformVersion)[-1].PlatformArn" \
+            --output text)
+
+          if [ -z "$PLATFORM_ARN" ] || [ "$PLATFORM_ARN" = "None" ]; then
+            echo "ERROR: Could not find .NET AL2 platform ARN"
             exit 1
           fi
 
-      - name: Update Lambda to use new image
+          echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
+
+      # 13. Create or Update EB environment
+      - name: Create or Update EB Environment
         env:
-          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
-          ECR_REPO: ${{ secrets.ECR_REPO }}
+          PLATFORM_ARN: ${{ env.PLATFORM_ARN }}
+          VERSION_LABEL: ${{ env.VERSION_LABEL }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          echo "Waiting for Lambda function to be ready for update..."
-          for i in {1..60}; do
-            STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
-            STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
-            echo "State: $STATE, LastUpdateStatus: $STATUS"
-            if [ "$STATE" = "Active" ] && [ "$STATUS" = "Successful" ]; then
-              break
-            fi
-            sleep 5
-          done
-          STATE=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'State' --output text)
-          STATUS=$(aws lambda get-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --query 'LastUpdateStatus' --output text)
-          if [ "$STATE" != "Active" ] || [ "$STATUS" != "Successful" ]; then
-            echo "Lambda function is not ready for update. State: $STATE, LastUpdateStatus: $STATUS"
-            exit 1
+          APP_NAME="Sample-AUTH-API"
+          ENV_NAME="development"
+
+          ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
+            --application-name "$APP_NAME" \
+            --environment-names "$ENV_NAME" \
+            --query "Environments[0].EnvironmentName" \
+            --output text 2>/dev/null)
+
+          if [ "$ENV_EXISTS" = "None" ]; then
+            echo "Creating EB environment..."
+            aws elasticbeanstalk create-environment \
+              --application-name "$APP_NAME" \
+              --environment-name "$ENV_NAME" \
+              --platform-arn "$PLATFORM_ARN" \
+              --version-label "$VERSION_LABEL" \
+              --option-settings Namespace=aws:autoscaling:launchconfiguration,OptionName=IamInstanceProfile,Value=aws-elasticbeanstalk-ec2-role
+          else
+            echo "Updating EB environment..."
+            aws elasticbeanstalk update-environment \
+              --environment-name "$ENV_NAME" \
+              --version-label "$VERSION_LABEL"
           fi
-          aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --image-uri "${ECR_REPO}:${GITHUB_SHA}" --region "$AWS_REGION"
-          aws lambda update-function-configuration --function-name "$LAMBDA_FUNCTION_NAME" --timeout 30 --memory-size 2048 --region "$AWS_REGION"
-
-      - name: Publish new Lambda version
-        env:
-          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: aws lambda publish-version --function-name "$LAMBDA_FUNCTION_NAME" --region "$AWS_REGION" || true
-
-      - name: CloudWatch diagnostics - list log groups for Lambda
-        env:
-          LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          echo "Listing CloudWatch log groups for /aws/lambda/$LAMBDA_FUNCTION_NAME"
-          aws logs describe-log-groups --log-group-name-prefix "/aws/lambda/$LAMBDA_FUNCTION_NAME" --region "$AWS_REGION" || true
-          echo "Show recent log streams (if any)"
-          aws logs describe-log-streams --log-group-name "/aws/lambda/$LAMBDA_FUNCTION_NAME" --order-by LastEventTime --descending --limit 5 --region "$AWS_REGION" || true
-
-      - name: Done
-        run: echo "Deployment finished. Lambda is now running the latest container image."
