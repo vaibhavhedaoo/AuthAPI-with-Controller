@@ -1,28 +1,24 @@
-﻿name: Manual Deploy to EC2
+﻿name: Deploy API to EC2
 
 on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Select environment to deploy"
         type: choice
-        required: true
+        description: Select environment
         options:
           - dev
           - qa
           - prod
-
-      deploy_backend:
-        description: "Deploy ASP.NET Core API?"
-        type: boolean
-        required: true
-        default: true
-
       deploy_branch:
-        description: "Select branch to deploy"
         type: string
         required: true
         default: "main"
+        description: Branch to deploy
+      deploy_backend:
+        type: boolean
+        default: true
+        description: Deploy backend?
 
 jobs:
   deploy:
@@ -32,10 +28,10 @@ jobs:
       DOTNET_VERSION: "9.0"
       SERVICE_NAME: "myapi"
       SERVICE_DIR: "/var/www/myapi"
-      APP_DLL_NAME: "AuthAPIwithController.dll"  # CHANGE THIS
+      APP_DLL_NAME: "AuthAPIwithController.dll"
 
     steps:
-      - name: Checkout selected branch
+      - name: Check out branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.deploy_branch }}
@@ -54,7 +50,7 @@ jobs:
       - name: Publish
         run: dotnet publish -c Release -o out
 
-      - name: Load environment-specific variables
+      - name: Resolve environment
         id: envs
         run: |
           if [ "${{ github.event.inputs.environment }}" = "dev" ]; then
@@ -71,68 +67,49 @@ jobs:
             echo "ENV_NAME=Production" >> $GITHUB_OUTPUT
           fi
 
-      - name: Prepare EC2 server (Install .NET, create folder, systemd)
+      - name: Install API folder on EC2
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.envs.outputs.EC2_HOST }}
           username: ${{ steps.envs.outputs.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -e
-
-            echo "=== Installing .NET Runtime if missing ==="
-            if ! command -v dotnet >/dev/null 2>&1; then
-              wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
-              sudo dpkg -i /tmp/packages-microsoft-prod.deb
+            sudo mkdir -p ${{ env.SERVICE_DIR }}
+            sudo chmod -R 755 ${{ env.SERVICE_DIR }}
+            if ! command -v dotnet >/dev/null; then
+              wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/pkg.deb
+              sudo dpkg -i /tmp/pkg.deb
               sudo apt-get update -y
               sudo apt-get install -y dotnet-runtime-9.0
             fi
 
-            echo "=== Create app directory ==="
-            sudo mkdir -p "${{ env.SERVICE_DIR }}"
-            sudo chmod -R 755 "${{ env.SERVICE_DIR }}"
+      - name: Upload systemd service file
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "systemd/myapi.service"
+          target: "/etc/systemd/system/"
 
-            echo "=== Writing systemd service file ==="
+      - name: upload build output
+        if: ${{ github.event.inputs.deploy_backend == 'true' }}
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "out/*"
+          target: "${{ env.SERVICE_DIR }}"
 
-            sudo bash -c "cat >/etc/systemd/system/${{ env.SERVICE_NAME }}.service" <<'EOF'
-                [Unit]
-                Description=ASP.NET Core API
-                After=network.target
-                
-                [Service]
-                WorkingDirectory=/var/www/myapi
-                ExecStart=/usr/bin/dotnet /var/www/myapi/AuthAPIwithController.dll
-                Restart=always
-                RestartSec=5
-                SyslogIdentifier=myapi
-                User=www-data
-                Environment=ASPNETCORE_ENVIRONMENT=Production
-                
-                [Install]
-                WantedBy=multi-user.target
-                EOF
-                
-                            echo "=== Reload & enable service ==="
-                            sudo systemctl daemon-reload
-                            sudo systemctl enable ${{ env.SERVICE_NAME }} || true
-                
-                      - name: Deploy published files to EC2
-                        if: ${{ github.event.inputs.deploy_backend == 'true' }}
-                        uses: appleboy/scp-action@v0.1.7
-                        with:
-                          host: ${{ steps.envs.outputs.EC2_HOST }}
-                          username: ${{ steps.envs.outputs.EC2_USER }}
-                          key: ${{ secrets.EC2_SSH_KEY }}
-                          source: "out/*"
-                          target: "${{ env.SERVICE_DIR }}"
-                
-                      - name: Restart service on EC2
-                        if: ${{ github.event.inputs.deploy_backend == 'true' }}
-                        uses: appleboy/ssh-action@v1.1.0
-                        with:
-                          host: ${{ steps.envs.outputs.EC2_HOST }}
-                          username: ${{ steps.envs.outputs.EC2_USER }}
-                          key: ${{ secrets.EC2_SSH_KEY }}
-                          script: |
-                            sudo systemctl restart ${{ env.SERVICE_NAME }}
-                            sudo systemctl status ${{ env.SERVICE_NAME }} --no-pager
+      - name: restart service
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo systemctl daemon-reload
+            sudo systemctl restart myapi
+            sudo systemctl enable myapi
+            sudo systemctl status myapi --no-pager
