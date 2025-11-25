@@ -29,9 +29,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DOTNET_VERSION: '8.0' # change if needed
+      DOTNET_VERSION: '8.0'       # change to your runtime if needed
       SERVICE_NAME: "myapi"
       SERVICE_DIR: "/var/www/myapi"
+      APP_DLL_NAME: "YourApp.dll" # change to your DLL name
 
     steps:
       - name: Checkout selected branch
@@ -53,7 +54,6 @@ jobs:
       - name: Publish
         run: dotnet publish -c Release -o out
 
-      # ========= Resolve environment-specific EC2 host/user ==========
       - name: Load environment-specific variables
         id: envs
         run: |
@@ -68,7 +68,6 @@ jobs:
             echo "EC2_USER=${{ secrets.EC2_PROD_USER }}" >> $GITHUB_OUTPUT
           fi
 
-      # ========= Remote EC2 Provisioning Before Deployment ==========
       - name: Prepare EC2 server (Install .NET, create folder, systemd)
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -76,29 +75,40 @@ jobs:
           username: ${{ steps.envs.outputs.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            echo "=== Updating apt ==="
+            set -euo pipefail
+
+            echo "=== apt update ==="
             sudo apt-get update -y
 
-            echo "=== Installing .NET Runtime (if not present) ==="
-            if ! command -v dotnet &> /dev/null
-            then
-              sudo apt-get update
+            echo "=== Ensure curl/wget & ca-certificates present ==="
+            sudo apt-get install -y wget apt-transport-https ca-certificates gnupg
+
+            echo "=== Install dotnet-runtime-8.0 if missing ==="
+            if ! command -v dotnet >/dev/null 2>&1; then
+              # Add Microsoft package source (works for Ubuntu/Debian)
+              wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb || true
+              sudo dpkg -i /tmp/packages-microsoft-prod.deb || true
+              sudo apt-get update -y
               sudo apt-get install -y dotnet-runtime-8.0 || true
+            else
+              echo "dotnet already installed: $(dotnet --version || true)"
             fi
 
-            echo "=== Creating API directory ==="
-            sudo mkdir -p ${{ env.SERVICE_DIR }}
-            sudo chmod -R 755 ${{ env.SERVICE_DIR }}
+            echo "=== Create app directory ==="
+            sudo mkdir -p "${{ env.SERVICE_DIR }}"
+            sudo chown -R $USER:www-data "${{ env.SERVICE_DIR }}" || true
+            sudo chmod -R 755 "${{ env.SERVICE_DIR }}"
 
-            echo "=== Creating systemd service ==="
-            sudo bash -c 'cat > /etc/systemd/system/${{ env.SERVICE_NAME }}.service <<EOF
+            echo "=== Write systemd service file ==="
+            # Using tee + quoted heredoc to avoid nested-quote YAML issues
+            sudo tee /etc/systemd/system/${{ env.SERVICE_NAME }}.service > /dev/null <<'SERVICE_EOF'
 [Unit]
-Description=ASP.NET Core API - ${{ env.SERVICE_NAME }}
+Description=ASP.NET Core API - $SERVICE_NAME
 After=network.target
 
 [Service]
 WorkingDirectory=${{ env.SERVICE_DIR }}
-ExecStart=/usr/bin/dotnet ${{ env.SERVICE_DIR }}/YourApp.dll
+ExecStart=/usr/bin/dotnet ${{ env.SERVICE_DIR }}/${{ env.APP_DLL_NAME }}
 Restart=always
 RestartSec=5
 SyslogIdentifier=${{ env.SERVICE_NAME }}
@@ -107,16 +117,13 @@ Environment=ASPNETCORE_ENVIRONMENT=Production
 
 [Install]
 WantedBy=multi-user.target
-EOF'
+SERVICE_EOF
 
-            echo "=== Reloading systemd ==="
+            echo "=== Reload systemd and enable service ==="
             sudo systemctl daemon-reload
-
-            echo "=== Enabling service ==="
             sudo systemctl enable ${{ env.SERVICE_NAME }} || true
 
-      # ========= SCP Deploy Files ==========
-      - name: Deploy to EC2
+      - name: Deploy published files to EC2
         if: ${{ github.event.inputs.deploy_backend == 'true' }}
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -126,8 +133,7 @@ EOF'
           source: "out/*"
           target: "${{ env.SERVICE_DIR }}"
 
-      # ========= Restart API Service ==========
-      - name: Restart service
+      - name: Restart service on EC2
         if: ${{ github.event.inputs.deploy_backend == 'true' }}
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -135,6 +141,7 @@ EOF'
           username: ${{ steps.envs.outputs.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            echo "=== Restarting myapi.service ==="
+            set -euo pipefail
+            echo "=== Restarting ${{ env.SERVICE_NAME }} ==="
             sudo systemctl restart ${{ env.SERVICE_NAME }}
             sudo systemctl status ${{ env.SERVICE_NAME }} --no-pager || true
