@@ -93,7 +93,7 @@ jobs:
           target: "/etc/systemd/system/"
 
       - name: upload build output
-        if: ${{ github.event.inputs.deploy_backend == 'true' }}
+        if: ${{ github.event.inputs.deploy_backend }}
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.envs.outputs.EC2_HOST }}
