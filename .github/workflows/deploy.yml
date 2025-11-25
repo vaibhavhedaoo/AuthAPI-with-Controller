@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DOTNET_VERSION: '9.0'
+      DOTNET_VERSION: "9.0"
       SERVICE_NAME: "myapi"
       SERVICE_DIR: "/var/www/myapi"
       APP_DLL_NAME: "AuthAPIwithController.dll"
@@ -60,15 +60,15 @@ jobs:
           if [ "${{ github.event.inputs.environment }}" = "dev" ]; then
             echo "EC2_HOST=${{ secrets.EC2_DEV_HOST }}" >> $GITHUB_OUTPUT
             echo "EC2_USER=${{ secrets.EC2_DEV_USER }}" >> $GITHUB_OUTPUT
-            echo "ASPNETCORE_ENVIRONMENT=Development" >> $GITHUB_OUTPUT
+            echo "ENV_NAME=Development" >> $GITHUB_OUTPUT
           elif [ "${{ github.event.inputs.environment }}" = "qa" ]; then
             echo "EC2_HOST=${{ secrets.EC2_QA_HOST }}" >> $GITHUB_OUTPUT
             echo "EC2_USER=${{ secrets.EC2_QA_USER }}" >> $GITHUB_OUTPUT
-            echo "ASPNETCORE_ENVIRONMENT=Staging" >> $GITHUB_OUTPUT
+            echo "ENV_NAME=Staging" >> $GITHUB_OUTPUT
           else
             echo "EC2_HOST=${{ secrets.EC2_PROD_HOST }}" >> $GITHUB_OUTPUT
             echo "EC2_USER=${{ secrets.EC2_PROD_USER }}" >> $GITHUB_OUTPUT
-            echo "ASPNETCORE_ENVIRONMENT=Production" >> $GITHUB_OUTPUT
+            echo "ENV_NAME=Production" >> $GITHUB_OUTPUT
           fi
 
       - name: Prepare EC2 server (Install .NET, create folder, systemd)
@@ -80,20 +80,12 @@ jobs:
           script: |
             set -euo pipefail
 
-            export ASPNETCORE_ENVIRONMENT="${{ steps.envs.outputs.ASPNETCORE_ENVIRONMENT }}"
-
-            echo "=== apt update ==="
-            sudo apt-get update -y
-
-            echo "=== Ensure curl/wget & ca-certificates present ==="
-            sudo apt-get install -y wget apt-transport-https ca-certificates gnupg
-
-            echo "=== Install dotnet-runtime-9.0 if missing ==="
+            echo "=== Installing .NET Runtime if missing ==="
             if ! command -v dotnet >/dev/null 2>&1; then
-              wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb || true
-              sudo dpkg -i /tmp/packages-microsoft-prod.deb || true
+              wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
+              sudo dpkg -i /tmp/packages-microsoft-prod.deb
               sudo apt-get update -y
-              sudo apt-get install -y dotnet-runtime-9.0 || true
+              sudo apt-get install -y dotnet-runtime-9.0
             else
               echo "dotnet already installed."
             fi
@@ -102,26 +94,26 @@ jobs:
             sudo mkdir -p "${{ env.SERVICE_DIR }}"
             sudo chmod -R 755 "${{ env.SERVICE_DIR }}"
 
-            echo "=== Write systemd service file ==="
-            sudo bash -c "cat > /etc/systemd/system/${{ env.SERVICE_NAME }}.service" << EOF
+            echo "=== Writing systemd service file ==="
+            sudo bash -c 'cat >/etc/systemd/system/'"${{ env.SERVICE_NAME }}"'.service <<EOF
 [Unit]
 Description=ASP.NET Core API
 After=network.target
 
 [Service]
-WorkingDirectory=${{ env.SERVICE_DIR }}
-ExecStart=/usr/bin/dotnet ${{ env.SERVICE_DIR }}/${{ env.APP_DLL_NAME }}
+WorkingDirectory='"${{ env.SERVICE_DIR }}"'
+ExecStart=/usr/bin/dotnet '"${{ env.SERVICE_DIR }}"'/'"${{ env.APP_DLL_NAME }}"'
 Restart=always
 RestartSec=5
-SyslogIdentifier=${{ env.SERVICE_NAME }}
+SyslogIdentifier='"${{ env.SERVICE_NAME }}"'
 User=www-data
-Environment=ASPNETCORE_ENVIRONMENT=\$ASPNETCORE_ENVIRONMENT
+Environment=ASPNETCORE_ENVIRONMENT='"${{ steps.envs.outputs.ENV_NAME }}"'
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF'
 
-            echo "=== Reload systemd and enable service ==="
+            echo "=== Reload & enable service ==="
             sudo systemctl daemon-reload
             sudo systemctl enable ${{ env.SERVICE_NAME }} || true
 
@@ -143,7 +135,5 @@ EOF
           username: ${{ steps.envs.outputs.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -euo pipefail
-            echo "=== Restarting ${{ env.SERVICE_NAME }} ==="
             sudo systemctl restart ${{ env.SERVICE_NAME }}
-            sudo systemctl status ${{ env.SERVICE_NAME }} --no-pager || true
+            sudo systemctl status ${{ env.SERVICE_NAME }} --no-pager
