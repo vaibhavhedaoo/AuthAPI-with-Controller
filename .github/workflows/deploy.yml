@@ -29,10 +29,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DOTNET_VERSION: '8.0'       # change to your runtime if needed
+      DOTNET_VERSION: '9.0'       # Updated to match your project
       SERVICE_NAME: "myapi"
       SERVICE_DIR: "/var/www/myapi"
-      APP_DLL_NAME: "YourApp.dll" # change to your DLL name
+      APP_DLL_NAME: "AuthAPIwithController.dll" # Updated to match your project
 
     steps:
       - name: Checkout selected branch
@@ -60,15 +60,18 @@ jobs:
           if [ "${{ github.event.inputs.environment }}" = "dev" ]; then
             echo "EC2_HOST=${{ secrets.EC2_DEV_HOST }}" >> $GITHUB_OUTPUT
             echo "EC2_USER=${{ secrets.EC2_DEV_USER }}" >> $GITHUB_OUTPUT
+            echo "ASPNETCORE_ENVIRONMENT=Development" >> $GITHUB_OUTPUT
           elif [ "${{ github.event.inputs.environment }}" = "qa" ]; then
             echo "EC2_HOST=${{ secrets.EC2_QA_HOST }}" >> $GITHUB_OUTPUT
             echo "EC2_USER=${{ secrets.EC2_QA_USER }}" >> $GITHUB_OUTPUT
+            echo "ASPNETCORE_ENVIRONMENT=Staging" >> $GITHUB_OUTPUT
           else
             echo "EC2_HOST=${{ secrets.EC2_PROD_HOST }}" >> $GITHUB_OUTPUT
             echo "EC2_USER=${{ secrets.EC2_PROD_USER }}" >> $GITHUB_OUTPUT
+            echo "ASPNETCORE_ENVIRONMENT=Production" >> $GITHUB_OUTPUT
           fi
 
-        - name: Prepare EC2 server (Install .NET, create folder, systemd)
+      - name: Prepare EC2 server (Install .NET, create folder, systemd)
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.envs.outputs.EC2_HOST }}
@@ -83,12 +86,12 @@ jobs:
             echo "=== Ensure curl/wget & ca-certificates present ==="
             sudo apt-get install -y wget apt-transport-https ca-certificates gnupg
 
-            echo "=== Install dotnet-runtime-8.0 if missing ==="
+            echo "=== Install dotnet-runtime-9.0 if missing ==="
             if ! command -v dotnet >/dev/null 2>&1; then
               wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb || true
               sudo dpkg -i /tmp/packages-microsoft-prod.deb || true
               sudo apt-get update -y
-              sudo apt-get install -y dotnet-runtime-8.0 || true
+              sudo apt-get install -y dotnet-runtime-9.0 || true
             else
               echo "dotnet already installed."
             fi
@@ -110,7 +113,7 @@ Restart=always
 RestartSec=5
 SyslogIdentifier=${{ env.SERVICE_NAME }}
 User=www-data
-Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_ENVIRONMENT=${{ steps.envs.outputs.ASPNETCORE_ENVIRONMENT }}
 
 [Install]
 WantedBy=multi-user.target
