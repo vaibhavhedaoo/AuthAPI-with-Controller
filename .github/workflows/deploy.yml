@@ -80,6 +80,8 @@ jobs:
           script: |
             set -euo pipefail
 
+            export ASPNETCORE_ENVIRONMENT="${{ steps.envs.outputs.ASPNETCORE_ENVIRONMENT }}"
+
             echo "=== apt update ==="
             sudo apt-get update -y
 
@@ -101,7 +103,7 @@ jobs:
             sudo chmod -R 755 "${{ env.SERVICE_DIR }}"
 
             echo "=== Write systemd service file ==="
-            sudo bash -c "cat > /etc/systemd/system/${{ env.SERVICE_NAME }}.service" << 'EOF'
+            sudo bash -c "cat > /etc/systemd/system/${{ env.SERVICE_NAME }}.service" << EOF
 [Unit]
 Description=ASP.NET Core API
 After=network.target
@@ -113,7 +115,7 @@ Restart=always
 RestartSec=5
 SyslogIdentifier=${{ env.SERVICE_NAME }}
 User=www-data
-Environment=ASPNETCORE_ENVIRONMENT=${{ steps.envs.outputs.ASPNETCORE_ENVIRONMENT }}
+Environment=ASPNETCORE_ENVIRONMENT=$ASPNETCORE_ENVIRONMENT
 
 [Install]
 WantedBy=multi-user.target
