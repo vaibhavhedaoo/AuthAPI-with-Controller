@@ -68,7 +68,7 @@ jobs:
             echo "EC2_USER=${{ secrets.EC2_PROD_USER }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Prepare EC2 server (Install .NET, create folder, systemd)
+        - name: Prepare EC2 server (Install .NET, create folder, systemd)
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.envs.outputs.EC2_HOST }}
@@ -85,25 +85,22 @@ jobs:
 
             echo "=== Install dotnet-runtime-8.0 if missing ==="
             if ! command -v dotnet >/dev/null 2>&1; then
-              # Add Microsoft package source (works for Ubuntu/Debian)
               wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb || true
               sudo dpkg -i /tmp/packages-microsoft-prod.deb || true
               sudo apt-get update -y
               sudo apt-get install -y dotnet-runtime-8.0 || true
             else
-              echo "dotnet already installed: $(dotnet --version || true)"
+              echo "dotnet already installed."
             fi
 
             echo "=== Create app directory ==="
             sudo mkdir -p "${{ env.SERVICE_DIR }}"
-            sudo chown -R $USER:www-data "${{ env.SERVICE_DIR }}" || true
             sudo chmod -R 755 "${{ env.SERVICE_DIR }}"
 
             echo "=== Write systemd service file ==="
-            # Using tee + quoted heredoc to avoid nested-quote YAML issues
-            sudo tee /etc/systemd/system/${{ env.SERVICE_NAME }}.service > /dev/null <<'SERVICE_EOF'
+            sudo bash -c "cat > /etc/systemd/system/${{ env.SERVICE_NAME }}.service" << 'EOF'
 [Unit]
-Description=ASP.NET Core API - $SERVICE_NAME
+Description=ASP.NET Core API
 After=network.target
 
 [Service]
@@ -117,7 +114,7 @@ Environment=ASPNETCORE_ENVIRONMENT=Production
 
 [Install]
 WantedBy=multi-user.target
-SERVICE_EOF
+EOF
 
             echo "=== Reload systemd and enable service ==="
             sudo systemctl daemon-reload
