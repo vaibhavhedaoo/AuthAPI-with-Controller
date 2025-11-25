@@ -29,10 +29,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DOTNET_VERSION: '9.0'       # Updated to match your project
+      DOTNET_VERSION: '9.0'
       SERVICE_NAME: "myapi"
       SERVICE_DIR: "/var/www/myapi"
-      APP_DLL_NAME: "AuthAPIwithController.dll" # Updated to match your project
+      APP_DLL_NAME: "AuthAPIwithController.dll"
 
     steps:
       - name: Checkout selected branch
@@ -115,7 +115,7 @@ Restart=always
 RestartSec=5
 SyslogIdentifier=${{ env.SERVICE_NAME }}
 User=www-data
-Environment=ASPNETCORE_ENVIRONMENT=$ASPNETCORE_ENVIRONMENT
+Environment=ASPNETCORE_ENVIRONMENT=\$ASPNETCORE_ENVIRONMENT
 
 [Install]
 WantedBy=multi-user.target
