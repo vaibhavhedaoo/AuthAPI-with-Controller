@@ -1,87 +1,102 @@
-﻿using Amazon;
-using AuthAPIwithController.Models;
-using AuthService.Data;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using Serilog;
 using System.Text;
+using AuthService.Data;
+using AuthAPIwithController.Models;
+using Microsoft.AspNetCore.Authorization;
 
-// ------------------------------------------------------------
-// EB FIX #1 → Bind to Elastic Beanstalk runtime port
-// ------------------------------------------------------------
 var builder = WebApplication.CreateBuilder(args);
 
+// ------------------------------------------------------------
+// 🔥 FIX: FORCE CONFIG RELOAD + ENV VARS HAVE PRIORITY
+// ------------------------------------------------------------
+builder.Configuration.Sources.Clear();
+builder.Configuration
+       .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+       .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true)
+       .AddEnvironmentVariables();
+
+// ------------------------------------------------------------
+// DEBUG ENVIRONMENT VARIABLE LOADING
+// ------------------------------------------------------------
+Console.WriteLine("DEBUG ENV Jwt__Key       = " + Environment.GetEnvironmentVariable("Jwt__Key"));
+Console.WriteLine("DEBUG ENV Jwt__Issuer    = " + Environment.GetEnvironmentVariable("Jwt__Issuer"));
+Console.WriteLine("DEBUG CONFIG Jwt__Key    = " + builder.Configuration["Jwt__Key"]);
+Console.WriteLine("DEBUG CONFIG Jwt__Issuer = " + builder.Configuration["Jwt__Issuer"]);
+
+// ------------------------------------------------------------
+// PORT (Elastic Beanstalk / Docker / Linux)
+// ------------------------------------------------------------
 var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
-Console.WriteLine($"Elastic Beanstalk PORT = {port}");
 builder.WebHost.UseUrls($"http://*:{port}");
 
 // ------------------------------------------------------------
-// SAFE SERILOG (NO CLOUDWATCH SINK, NO CRASH)
+// LOGGING (Serilog)
 // ------------------------------------------------------------
 var logFolder = "/var/app/current/logs";
-var logFile = $"{logFolder}/app-log.txt";
 Directory.CreateDirectory(logFolder);
 
-var loggerConfig = new LoggerConfiguration()
-    .MinimumLevel.Debug()
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
     .WriteTo.Console()
-    .WriteTo.File(
-        path: logFile,
-        rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 7
-    );
+    .WriteTo.File($"{logFolder}/app-log.txt", rollingInterval: RollingInterval.Day)
+    .CreateLogger();
 
-Log.Logger = loggerConfig.CreateLogger();
 builder.Host.UseSerilog();
 
 // ------------------------------------------------------------
-// Services
+// SERVICES
 // ------------------------------------------------------------
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
+
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
-    {
-        Title = "My API",
-        Version = "v1"
-    });
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Auth API", Version = "v1" });
 
-    c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Name = "Authorization",
-        Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+        Type = SecuritySchemeType.ApiKey,
         Scheme = "Bearer",
-        BearerFormat = "JWT",
-        In = Microsoft.OpenApi.Models.ParameterLocation.Header
+        In = ParameterLocation.Header
     });
 
-    c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
         {
-            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            new OpenApiSecurityScheme
             {
-                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                Reference = new OpenApiReference
                 {
-                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Type = ReferenceType.SecurityScheme,
                     Id = "Bearer"
                 }
             },
-            new string[] {}
+            new string[0]
         }
     });
 });
 
 // ------------------------------------------------------------
-// Database (Linux path fixed for EB)
+// DATABASE
 // ------------------------------------------------------------
+var connectionString = Environment.GetEnvironmentVariable("DefaultConnection");
+
 builder.Services.AddDbContext<AppDBContext>(options =>
-    options.UseSqlite("DataSource=/var/app/current/appdata.db"));
+    options.UseMySql(
+        connectionString,
+        new MySqlServerVersion(new Version(8, 0, 36)),
+        mySqlOptions => mySqlOptions.EnableRetryOnFailure()
+    )
+);
 
 // ------------------------------------------------------------
-// Identity
+// IDENTITY
 // ------------------------------------------------------------
 builder.Services
     .AddIdentity<User, IdentityRole>(options =>
@@ -93,10 +108,14 @@ builder.Services
     .AddDefaultTokenProviders();
 
 // ------------------------------------------------------------
-// JWT Auth
+// JWT AUTHENTICATION (Environment Variables)
 // ------------------------------------------------------------
-var jwtKey = builder.Configuration["Jwt:Key"];
-var jwtIssuer = builder.Configuration["Jwt:Issuer"];
+var jwtKey = Environment.GetEnvironmentVariable("Jwt__Key");
+var jwtIssuer = Environment.GetEnvironmentVariable("Jwt__Issuer");
+Console.WriteLine("JWT Issuer: " + jwtIssuer);
+
+if (string.IsNullOrWhiteSpace(jwtKey))
+    throw new Exception("Missing environment variable: Jwt__Key");
 
 builder.Services.AddAuthentication(options =>
 {
@@ -106,6 +125,8 @@ builder.Services.AddAuthentication(options =>
 .AddJwtBearer(options =>
 {
     options.RequireHttpsMetadata = false;
+    options.SaveToken = true;
+
     options.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
@@ -117,33 +138,46 @@ builder.Services.AddAuthentication(options =>
     };
 });
 
-builder.Services.AddAuthorization();
+
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("ADMIN", policy =>
+        policy.RequireRole("ADMIN"));
+
+    options.AddPolicy("USER", policy =>
+        policy.RequireRole("USER"));
+});
 builder.Services.AddScoped<IEmailService, EmailService>();
 
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
+
+builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, CustomAuthorizationHandler>();
+
 // ------------------------------------------------------------
-// Build App
+// BUILD PIPELINE
 // ------------------------------------------------------------
 var app = builder.Build();
 
 app.UseSwagger();
 app.UseSwaggerUI();
 
-// ------------------------------------------------------------
-// EB FIX: disable HTTPS redirection (ALB already uses HTTPS)
-// ------------------------------------------------------------
-if (app.Environment.IsDevelopment())
-{
-    app.UseHttpsRedirection();
-}
+//if (app.Environment.IsDevelopment())
+//{
+//    app.UseHttpsRedirection();
+//}
 
 app.UseAuthentication();
 app.UseAuthorization();
+
 app.MapControllers();
-
-// ------------------------------------------------------------
-// EB Health Endpoints
-// ------------------------------------------------------------
-app.MapGet("/", () => "API is running on Elastic Beanstalk");
 app.MapGet("/health", () => Results.Ok("Healthy"));
-
+app.UseCors();
 app.Run();

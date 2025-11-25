@@ -1,142 +1,140 @@
-﻿name: Deploy ASP.NET Core API to AWS Elastic Beanstalk
+﻿name: Manual Deploy to EC2
 
 on:
-  push:
-    branches:
-      - common-devlopement
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "Select environment to deploy"
+        type: choice
+        required: true
+        options:
+          - dev
+          - qa
+          - prod
+
+      deploy_backend:
+        description: "Deploy ASP.NET Core API?"
+        type: boolean
+        required: true
+        default: true
+
+      deploy_branch:
+        description: "Select branch to deploy"
+        type: string
+        required: true
+        default: "main"
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
+    env:
+      DOTNET_VERSION: '8.0' # change if needed
+      SERVICE_NAME: "myapi"
+      SERVICE_DIR: "/var/www/myapi"
+
     steps:
-      # 1. Checkout
-      - uses: actions/checkout@v3
-
-      # 2. Setup .NET
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v3
+      - name: Checkout selected branch
+        uses: actions/checkout@v4
         with:
-          dotnet-version: '9.0.x'
+          ref: ${{ github.event.inputs.deploy_branch }}
 
-      # 3. Restore
-      - name: Restore dependencies
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
         run: dotnet restore
 
-      # 4. Build
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      # 5. Publish
       - name: Publish
-        run: dotnet publish -c Release -o publish
+        run: dotnet publish -c Release -o out
 
-      # ⭐ 6. Copy .ebextensions folder to publish output
-      - name: Copy .ebextensions
-        run: cp -r .ebextensions publish/
-
-      # 7. Zip publish output
-      - name: Zip publish folder
+      # ========= Resolve environment-specific EC2 host/user ==========
+      - name: Load environment-specific variables
+        id: envs
         run: |
-          cd publish
-          zip -r ../app.zip .
-          cd ..
-
-      # 8. Configure AWS credentials
-      - name: Configure AWS
-        run: |
-          echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
-          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
-
-      # 9. Ensure S3 bucket exists
-      - name: Ensure S3 Bucket Exists
-        run: |
-          APP_NAME="Sample-AUTH-API"
-          APP_NAME_LC=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
-          BUCKET_NAME="${APP_NAME_LC}-${{ secrets.AWS_ACCOUNT_ID }}"
-          echo "Using bucket: $BUCKET_NAME"
-          aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null || \
-            aws s3 mb "s3://$BUCKET_NAME" --region "$AWS_REGION"
-          echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
-
-      # 10. Upload zip to S3 with version label
-      - name: Upload to S3
-        run: |
-          VERSION_LABEL="v${GITHUB_RUN_NUMBER}-$(date +%Y%m%d%H%M%S)"
-          aws s3 cp app.zip "s3://$BUCKET_NAME/$VERSION_LABEL.zip"
-          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
-
-      # 11. Create EB application version
-      - name: Create EB Application Version
-        run: |
-          APP_NAME="Sample-AUTH-API"
-          VERSION_LABEL="${{ env.VERSION_LABEL }}"
-          BUCKET_NAME="${{ env.BUCKET_NAME }}"
-          ZIP_FILE="$VERSION_LABEL.zip"
-
-          VERSION_EXISTS=$(aws elasticbeanstalk describe-application-versions \
-            --application-name "$APP_NAME" \
-            --version-labels "$VERSION_LABEL" \
-            --query "ApplicationVersions[0].VersionLabel" \
-            --output text)
-
-          if [ "$VERSION_EXISTS" = "None" ]; then
-            aws elasticbeanstalk create-application-version \
-              --application-name "$APP_NAME" \
-              --version-label "$VERSION_LABEL" \
-              --source-bundle S3Bucket="$BUCKET_NAME",S3Key="$ZIP_FILE" \
-              --auto-create-application
+          if [ "${{ github.event.inputs.environment }}" = "dev" ]; then
+            echo "EC2_HOST=${{ secrets.EC2_DEV_HOST }}" >> $GITHUB_OUTPUT
+            echo "EC2_USER=${{ secrets.EC2_DEV_USER }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.inputs.environment }}" = "qa" ]; then
+            echo "EC2_HOST=${{ secrets.EC2_QA_HOST }}" >> $GITHUB_OUTPUT
+            echo "EC2_USER=${{ secrets.EC2_QA_USER }}" >> $GITHUB_OUTPUT
           else
-            echo "Application version $VERSION_LABEL already exists, skipping creation."
+            echo "EC2_HOST=${{ secrets.EC2_PROD_HOST }}" >> $GITHUB_OUTPUT
+            echo "EC2_USER=${{ secrets.EC2_PROD_USER }}" >> $GITHUB_OUTPUT
           fi
 
-      # 12. Determine latest .NET AL2 platform ARN
-      - name: Determine latest .NET AL2 Platform ARN
-        id: get_platform
-        run: |
-          PLATFORM_ARN=$(aws elasticbeanstalk list-platform-versions \
-            --filters "Type=PlatformName,Operator=contains,Values=.NET" \
-            --query "sort_by(PlatformSummaryList[?contains(PlatformArn,'Linux 2')], &PlatformVersion)[-1].PlatformArn" \
-            --output text)
+      # ========= Remote EC2 Provisioning Before Deployment ==========
+      - name: Prepare EC2 server (Install .NET, create folder, systemd)
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "=== Updating apt ==="
+            sudo apt-get update -y
 
-          if [ -z "$PLATFORM_ARN" ] || [ "$PLATFORM_ARN" = "None" ]; then
-            echo "ERROR: Could not find .NET AL2 platform ARN"
-            exit 1
-          fi
+            echo "=== Installing .NET Runtime (if not present) ==="
+            if ! command -v dotnet &> /dev/null
+            then
+              sudo apt-get update
+              sudo apt-get install -y dotnet-runtime-8.0 || true
+            fi
 
-          echo "PLATFORM_ARN=$PLATFORM_ARN" >> $GITHUB_ENV
+            echo "=== Creating API directory ==="
+            sudo mkdir -p ${{ env.SERVICE_DIR }}
+            sudo chmod -R 755 ${{ env.SERVICE_DIR }}
 
-      # 13. Create or Update EB environment
-      - name: Create or Update EB Environment
-        env:
-          PLATFORM_ARN: ${{ env.PLATFORM_ARN }}
-          VERSION_LABEL: ${{ env.VERSION_LABEL }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        run: |
-          APP_NAME="Sample-AUTH-API"
-          ENV_NAME="development"
+            echo "=== Creating systemd service ==="
+            sudo bash -c 'cat > /etc/systemd/system/${{ env.SERVICE_NAME }}.service <<EOF
+[Unit]
+Description=ASP.NET Core API - ${{ env.SERVICE_NAME }}
+After=network.target
 
-          ENV_EXISTS=$(aws elasticbeanstalk describe-environments \
-            --application-name "$APP_NAME" \
-            --environment-names "$ENV_NAME" \
-            --query "Environments[0].EnvironmentName" \
-            --output text 2>/dev/null)
+[Service]
+WorkingDirectory=${{ env.SERVICE_DIR }}
+ExecStart=/usr/bin/dotnet ${{ env.SERVICE_DIR }}/YourApp.dll
+Restart=always
+RestartSec=5
+SyslogIdentifier=${{ env.SERVICE_NAME }}
+User=www-data
+Environment=ASPNETCORE_ENVIRONMENT=Production
 
-          if [ "$ENV_EXISTS" = "None" ]; then
-            echo "Creating EB environment..."
-            aws elasticbeanstalk create-environment \
-              --application-name "$APP_NAME" \
-              --environment-name "$ENV_NAME" \
-              --platform-arn "$PLATFORM_ARN" \
-              --version-label "$VERSION_LABEL" \
-              --option-settings Namespace=aws:autoscaling:launchconfiguration,OptionName=IamInstanceProfile,Value=aws-elasticbeanstalk-ec2-role
-          else
-            echo "Updating EB environment..."
-            aws elasticbeanstalk update-environment \
-              --environment-name "$ENV_NAME" \
-              --version-label "$VERSION_LABEL"
-          fi
+[Install]
+WantedBy=multi-user.target
+EOF'
+
+            echo "=== Reloading systemd ==="
+            sudo systemctl daemon-reload
+
+            echo "=== Enabling service ==="
+            sudo systemctl enable ${{ env.SERVICE_NAME }} || true
+
+      # ========= SCP Deploy Files ==========
+      - name: Deploy to EC2
+        if: ${{ github.event.inputs.deploy_backend == 'true' }}
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "out/*"
+          target: "${{ env.SERVICE_DIR }}"
+
+      # ========= Restart API Service ==========
+      - name: Restart service
+        if: ${{ github.event.inputs.deploy_backend == 'true' }}
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "=== Restarting myapi.service ==="
+            sudo systemctl restart ${{ env.SERVICE_NAME }}
+            sudo systemctl status ${{ env.SERVICE_NAME }} --no-pager || true

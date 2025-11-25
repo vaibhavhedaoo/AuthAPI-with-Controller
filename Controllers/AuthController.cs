@@ -10,17 +10,19 @@ public class AuthController : ControllerBase
 {
     private readonly UserManager<User> _userManager;
     private readonly SignInManager<User> _signInManager;
+    private readonly RoleManager<IdentityRole> _roleManager;
     private readonly ILogger<AuthController> _logger;
     private readonly IEmailService _emailService;
     private readonly IConfiguration _config;
 
-    public AuthController(UserManager<User> userManager, SignInManager<User> signInManager, ILogger<AuthController> logger, IEmailService emailService, IConfiguration config)
+    public AuthController(UserManager<User> userManager, SignInManager<User> signInManager, ILogger<AuthController> logger, IEmailService emailService, IConfiguration config, RoleManager<IdentityRole> roleManager)
     {
         _userManager = userManager;
         _signInManager = signInManager;
         _logger = logger;
         _emailService = emailService;
         _config = config;
+        _roleManager = roleManager;
     }
 
     // -------------------------
@@ -37,6 +39,23 @@ public class AuthController : ControllerBase
         };
 
         var result = await _userManager.CreateAsync(user, request.Password);
+        if (!await _roleManager.RoleExistsAsync("ADMIN"))
+        {
+            await _roleManager.CreateAsync(new IdentityRole("ADMIN"));
+        }
+        if (!await _roleManager.RoleExistsAsync("USER"))
+        {
+            await _roleManager.CreateAsync(new IdentityRole("USER"));
+        }
+
+        if (result.Succeeded && request.Role == "ADMIN")
+        {
+            await _userManager.AddToRoleAsync(user, "ADMIN");
+        }
+        else if (result.Succeeded && (request.Role!= "ADMIN" || string.IsNullOrEmpty(request.Role)))
+        {
+            await _userManager.AddToRoleAsync(user, "USER");
+        }
 
         if (!result.Succeeded)
         {
@@ -59,22 +78,33 @@ public class AuthController : ControllerBase
     public async Task<IActionResult> Login([FromBody] LoginRequest request)
     {
         _logger.LogInformation("Login request received...");
-        var result = await _signInManager.PasswordSignInAsync(request.UserName, request.Password, false, false);
+
+        var user = await _userManager.FindByNameAsync(request.UserName);
+        if (user == null)
+            return Unauthorized(new { message = "Invalid username or password" });
+
+        var result = await _signInManager.CheckPasswordSignInAsync(user, request.Password, false);
 
         if (!result.Succeeded)
-            return Unauthorized(new { message = "Invalid credentials" });
+            return Unauthorized(new { message = "Invalid username or password" });
 
-        // Generate JWT
-        //var jwtKey = builder.Configuration["Jwt:Key"];// "SuperSecretKey12345"; // or read from configuration
-        //var jwtIssuer = builder.Configuration["Jwt:Key"]; // or read from configuration
-        var token = JwtTokenGenerator.GenerateToken(request.UserName, _config);
+        // Fetch roles for JWT
+        var roles = await _userManager.GetRolesAsync(user);
+
+        // Generate JWT with roles
+        var token = JwtTokenGenerator.GenerateToken(user, roles, _config);
 
         return Ok(new
         {
             message = "Logged in successfully",
-            token
+            userID = user.Id,
+            accessToken = token.AccessToken,
+            accessTokenExpires = token.AccessTokenExpires,
+            refreshToken = token.RefreshToken,
+            refreshTokenExpires = token.RefreshTokenExpires
         });
     }
+
     // -------------------------
     // Logout
     // -------------------------

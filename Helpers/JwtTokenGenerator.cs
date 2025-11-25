@@ -1,4 +1,5 @@
-﻿using Microsoft.IdentityModel.Tokens;
+﻿using AuthAPIwithController.Models;
+using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
@@ -6,7 +7,6 @@ using System.Text;
 
 public static class JwtTokenGenerator
 {
-
     public class JwtTokenResult
     {
         public string AccessToken { get; set; }
@@ -15,65 +15,60 @@ public static class JwtTokenGenerator
         public DateTime RefreshTokenExpires { get; set; }
     }
 
-    public static JwtTokenResult GenerateToken(string userName, IConfiguration configuration)
+    public static JwtTokenResult GenerateToken(User user, IList<string> roles, IConfiguration config)
     {
-        // 1. Claims
-        var claims = new[]
-        {
-        new Claim(JwtRegisteredClaimNames.Sub, userName),
-        new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-        new Claim("username", userName)
-    };
+        // Load JWT settings correctly (using colon syntax)
+        var key = config["Jwt:Key"];
+        var issuer = config["Jwt:Issuer"];
 
-        // 2. Validate key from configuration
-        var keyString = configuration["Jwt:Key"] +"9730350945thisismylongkeytogeneratetokenforthidapplication";
-        if (string.IsNullOrWhiteSpace(keyString) || keyString.Length < 32)
+        if (string.IsNullOrWhiteSpace(key))
+            throw new Exception("Jwt:Key is missing in configuration.");
+
+        if (string.IsNullOrWhiteSpace(issuer))
+            throw new Exception("Jwt:Issuer is missing in configuration.");
+
+        // Build Claims
+        var claims = new List<Claim>
         {
-            throw new Exception("JWT Key must be at least 32 characters long (256 bits).");
+            new Claim(ClaimTypes.NameIdentifier, user.Id),
+            new Claim(ClaimTypes.Name, user.UserName),
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+        };
+
+        foreach (var role in roles)
+        {
+            claims.Add(new Claim(ClaimTypes.Role, role));
         }
 
-        var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(keyString));
-        var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
+        // Signing Key
+        var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key));
+        var creds = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
 
-        // 3. Access token (10 minutes)
-        var accessTokenExpiration = DateTime.UtcNow.AddMinutes(10);
+        // Expirations
+        var accessTokenExpires = DateTime.UtcNow.AddHours(8);
+        var refreshTokenExpires = DateTime.UtcNow.AddDays(7);
 
+        // Create Access Token
         var jwtToken = new JwtSecurityToken(
-            issuer: configuration["Jwt:Issuer"],
-            audience: configuration["Jwt:Audience"],
+            issuer: issuer,
+            audience: issuer,
             claims: claims,
-            expires: accessTokenExpiration,
-            signingCredentials: credentials
+            expires: accessTokenExpires,
+            signingCredentials: creds
         );
 
         var accessToken = new JwtSecurityTokenHandler().WriteToken(jwtToken);
 
-        // 4. Refresh token (secure random 32 bytes → Base64)
-        var refreshToken = GenerateRefreshToken();
-        var refreshTokenExpiration = DateTime.UtcNow.AddDays(7);
+        // Create Refresh Token
+        var refreshToken = Convert.ToBase64String(Guid.NewGuid().ToByteArray());
 
-        // 5. Return combined token result
+        // FINAL RESULT
         return new JwtTokenResult
         {
             AccessToken = accessToken,
-            AccessTokenExpires = accessTokenExpiration,
+            AccessTokenExpires = accessTokenExpires,
             RefreshToken = refreshToken,
-            RefreshTokenExpires = refreshTokenExpiration
+            RefreshTokenExpires = refreshTokenExpires
         };
     }
-
-    /// <summary>
-    /// Generates a cryptographically secure refresh token (Base64 encoded).
-    /// </summary>
-    private static string GenerateRefreshToken()
-    {
-        var randomBytes = new byte[32]; // 256-bit refresh token
-        using (var rng = RandomNumberGenerator.Create())
-        {
-            rng.GetBytes(randomBytes);
-        }
-
-        return Convert.ToBase64String(randomBytes);
-    }
-
 }
