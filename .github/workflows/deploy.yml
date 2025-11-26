@@ -104,7 +104,7 @@ jobs:
         id: ec2
         if: steps.find.outputs.FOUND == 'false'
         run: |
-          INSTANCE_ID=$(aws ec2 run-instances \
+          INSTANCE_ID=$(aws ec2.run-instances \
             --image-id ${{ steps.ami.outputs.AMI_ID }} \
             --instance-type ${{ env.INSTANCE_TYPE }} \
             --key-name ${{ env.SSH_KEY_NAME }} \
@@ -144,13 +144,18 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            echo "===== INSTALLING DEPENDENCIES ====="
+            echo "===== INSTALL DOTNET FROM MICROSOFT REPO ====="
+            wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+            sudo dpkg -i packages-microsoft-prod.deb
+            rm packages-microsoft-prod.deb
+
             sudo apt update -y
-            sudo apt install -y dotnet-sdk-9.0 nginx
+            sudo apt install -y dotnet-sdk-8.0 aspnetcore-runtime-8.0 nginx
 
             echo "===== FIX DOTNET PATH ====="
-            sudo ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet
-            dotnet --version || echo "dotnet not detected"
+            sudo ln -sf /usr/bin/dotnet /usr/share/dotnet/dotnet || true
+            sudo ln -sf /usr/bin/dotnet /usr/bin/dotnet || true
+            dotnet --version
 
             echo "===== PREPARE APPLICATION FOLDER ====="
             sudo mkdir -p /var/www/myapi
