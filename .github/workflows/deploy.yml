@@ -148,7 +148,6 @@ jobs:
             sudo mkdir -p /var/www/myapi
             sudo chown -R ubuntu:ubuntu /var/www/myapi
             sudo chmod -R 775 /var/www/myapi
-            # create systemd service for the API
             sudo tee /etc/systemd/system/myapi.service > /dev/null << 'EOF'
             [Unit]
             Description=My API Service
@@ -163,14 +162,12 @@ jobs:
             User=ubuntu
             Environment=ASPNETCORE_ENVIRONMENT=Production
             Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
-            Environment=ASPNETCORE_URLS=http://0.0.0.0:5000
             [Install]
             WantedBy=multi-user.target
             EOF
             sudo systemctl daemon-reload
             sudo systemctl enable myapi
-            sudo systemctl restart myapi
-            sudo systemctl status myapi --no-pager || true
+            sudo systemctl restart myapi || true
 
       - name: Publish .NET API
         run: dotnet publish -c Release -o out
@@ -182,9 +179,24 @@ jobs:
           host: ${{ steps.ip.outputs.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: EC2_SSH_KEY
           source: "out/*"
           target: "${{ env.SERVICE_DIR }}"
+
+      # ===================== DEBUG STEP ADDED ============================
+      - name: Debug myapi service logs
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.ip.outputs.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "==== SYSTEMCTL STATUS ===="
+            sudo systemctl status myapi --no-pager
+            echo "==== JOURNALCTL LOGS (LAST 100) ===="
+            sudo journalctl -u myapi --no-pager -n 100
+            echo "==== LISTENING PORTS ===="
+            sudo lsof -i -P -n | grep LISTEN
+      # ==================================================================
 
       - name: Finished
         run: echo "Deployment completed successfully 🎉"
