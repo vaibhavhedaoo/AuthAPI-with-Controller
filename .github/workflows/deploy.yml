@@ -20,6 +20,7 @@ on:
 
       deploy_backend:
         description: "Deploy backend?"
+        required: true
         type: boolean
         default: true
 
@@ -34,8 +35,7 @@ jobs:
       APP_DLL_NAME: "AuthAPIwithController.dll"
 
     steps:
-
-      # Checkout base repo to determine default branch
+      # Determine which branch to use
       - name: Initial Checkout to determine default branch
         uses: actions/checkout@v4
         with:
@@ -46,14 +46,14 @@ jobs:
         run: |
           if [ -z "${{ github.event.inputs.deploy_branch }}" ]; then
             DEFAULT_BRANCH=$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')
-            echo "No branch selected. Using default branch: $DEFAULT_BRANCH"
+            echo "No branch selected, using default branch: $DEFAULT_BRANCH"
             echo "BRANCH=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
           else
             echo "Branch selected: ${{ github.event.inputs.deploy_branch }}"
             echo "BRANCH=${{ github.event.inputs.deploy_branch }}" >> $GITHUB_OUTPUT
           fi
 
-      # Checkout final branch for deployment
+      # Checkout selected branch
       - name: Checkout deployment branch
         uses: actions/checkout@v4
         with:
@@ -74,22 +74,20 @@ jobs:
       - name: Publish project
         run: dotnet publish -c Release -o out
 
-      - name: Resolve environment settings
+      # Simplified environment resolution using same secret for all environments
+      - name: Resolve EC2 Host & User values
         id: envs
         run: |
-          if [ "${{ github.event.inputs.environment }}" = "dev" ]; then
-            echo "EC2_HOST=${{ secrets.EC2_DEV_HOST }}" >> $GITHUB_OUTPUT
-            echo "EC2_USER=${{ secrets.EC2_DEV_USER }}" >> $GITHUB_OUTPUT
-            echo "ENV_NAME=Development" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event.inputs.environment }}" = "qa" ]; then
-            echo "EC2_HOST=${{ secrets.EC2_QA_HOST }}" >> $GITHUB_OUTPUT
-            echo "EC2_USER=${{ secrets.EC2_QA_USER }}" >> $GITHUB_OUTPUT
-            echo "ENV_NAME=Staging" >> $GITHUB_OUTPUT
-          else
-            echo "EC2_HOST=${{ secrets.EC2_PROD_HOST }}" >> $GITHUB_OUTPUT
-            echo "EC2_USER=${{ secrets.EC2_PROD_USER }}" >> $GITHUB_OUTPUT
-            echo "ENV_NAME=Production" >> $GITHUB_OUTPUT
-          fi
+          echo "EC2_HOST=${{ secrets.EC2_HOST }}" >> $GITHUB_OUTPUT
+          echo "EC2_USER=${{ secrets.EC2_USER }}" >> $GITHUB_OUTPUT
+          echo "ENV_NAME=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+
+      # Debugging output
+      - name: Debug host and env values
+        run: |
+          echo "Host: ${{ steps.envs.outputs.EC2_HOST }}"
+          echo "User: ${{ steps.envs.outputs.EC2_USER }}"
+          echo "Environment: ${{ steps.envs.outputs.ENV_NAME }}"
 
       - name: Create folder and install runtime if needed
         uses: appleboy/ssh-action@v1.1.0
