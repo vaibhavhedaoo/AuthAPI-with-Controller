@@ -72,18 +72,6 @@ jobs:
           AMI=$(aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id --query "Parameter.Value" --output text)
           echo "AMI_ID=$AMI" >> $GITHUB_OUTPUT
 
-      - name: Create EC2 keypair
-        run: |
-          if aws ec2 describe-key-pairs --key-name ${{ env.SSH_KEY_NAME }} >/dev/null 2>&1; then
-            echo "Key exists"
-          else
-            aws ec2 create-key-pair --key-name ${{ env.SSH_KEY_NAME }} --query "KeyMaterial" --output text > private.pem
-            chmod 400 private.pem
-            echo 'EC2_SSH_KEY<<EOF' >> $GITHUB_ENV
-            cat private.pem >> $GITHUB_ENV
-            echo 'EOF' >> $GITHUB_ENV
-          fi
-
       - name: Launch EC2 instance
         id: ec2
         run: |
@@ -110,15 +98,15 @@ jobs:
 
       - name: Setup EC2 dependencies
         uses: appleboy/ssh-action@v1.1.0
-        env:
-          EC2_SSH_KEY: ${{ env.EC2_SSH_KEY }}
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
           username: ubuntu
-          key: ${{ env.EC2_SSH_KEY }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: EC2_SSH_KEY
           script: |
             sudo apt update -y
             sudo apt install -y dotnet-sdk-9.0 nginx
+            sudo systemctl enable nginx --now
             sudo mkdir -p ${{ env.SERVICE_DIR }}
 
       - name: Publish .NET API
@@ -127,12 +115,11 @@ jobs:
       - name: Upload build output
         if: ${{ github.event.inputs.deploy_backend }}
         uses: appleboy/scp-action@v0.1.7
-        env:
-          EC2_SSH_KEY: ${{ env.EC2_SSH_KEY }}
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
           username: ubuntu
-          key: ${{ env.EC2_SSH_KEY }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: EC2_SSH_KEY
           source: "out/*"
           target: "${{ env.SERVICE_DIR }}"
 
