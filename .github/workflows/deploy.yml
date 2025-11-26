@@ -111,7 +111,6 @@ jobs:
             --key-name ${{ env.SSH_KEY_NAME }} \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=Project,Value=myapi}]' \
             --query "Instances[0].InstanceId" --output text)
-
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
 
       - name: Determine instance id to use
@@ -133,6 +132,9 @@ jobs:
 
       - name: Output EC2 Host
         run: echo "EC2 Host is ${{ steps.ip.outputs.EC2_HOST }}"
+
+      - name: Wait for instance status checks
+        run: aws ec2 wait instance-status-ok --instance-ids ${{ steps.use.outputs.INSTANCE_ID }}
 
       - name: Setup EC2 dependencies
         uses: appleboy/ssh-action@v1.1.0
