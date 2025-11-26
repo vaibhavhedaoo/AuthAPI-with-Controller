@@ -134,13 +134,12 @@ jobs:
       - name: Wait for instance status checks
         run: aws ec2 wait instance-status-ok --instance-ids ${{ steps.use.outputs.INSTANCE_ID }}
 
-      - name: Setup EC2 dependencies
+      - name: Setup EC2 dependencies and systemd service
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: EC2_SSH_KEY
           script: |
             sudo apt update -y
             sudo apt install -y dotnet-sdk-9.0 nginx
@@ -148,13 +147,15 @@ jobs:
             sudo mkdir -p /var/www/myapi
             sudo chown -R ubuntu:ubuntu /var/www/myapi
             sudo chmod -R 775 /var/www/myapi
+
             sudo tee /etc/systemd/system/myapi.service > /dev/null << 'EOF'
             [Unit]
             Description=My API Service
             After=network.target
+
             [Service]
             WorkingDirectory=/var/www/myapi
-            ExecStart=/usr/bin/dotnet /var/www/myapi/AuthAPIwithController.dll
+            ExecStart=/usr/bin/dotnet /var/www/myapi/AuthAPIwithController.dll --urls "http://0.0.0.0:5000"
             Restart=always
             RestartSec=10
             KillSignal=SIGINT
@@ -162,9 +163,11 @@ jobs:
             User=ubuntu
             Environment=ASPNETCORE_ENVIRONMENT=Production
             Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
+
             [Install]
             WantedBy=multi-user.target
             EOF
+
             sudo systemctl daemon-reload
             sudo systemctl enable myapi
             sudo systemctl restart myapi || true
@@ -182,8 +185,8 @@ jobs:
           source: "out/*"
           target: "${{ env.SERVICE_DIR }}"
 
-      # ===================== DEBUG STEP ADDED ============================
-      - name: Debug myapi service logs
+      # ================= DEBUG LOGS PRESERVED ==================
+      - name: Debug systemd logs & listening ports
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
@@ -192,11 +195,11 @@ jobs:
           script: |
             echo "==== SYSTEMCTL STATUS ===="
             sudo systemctl status myapi --no-pager
-            echo "==== JOURNALCTL LOGS (LAST 100) ===="
+            echo "==== JOURNALCTL LOGS ===="
             sudo journalctl -u myapi --no-pager -n 100
             echo "==== LISTENING PORTS ===="
             sudo lsof -i -P -n | grep LISTEN
-      # ==================================================================
+      # =========================================================
 
       - name: Finished
         run: echo "Deployment completed successfully 🎉"
