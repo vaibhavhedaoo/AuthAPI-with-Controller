@@ -37,6 +37,9 @@ jobs:
       SERVICE_DIR: "/var/www/myapi"
       DOTNET_VERSION: "9.0"
 
+    outputs:
+      INSTANCE_ID: ${{ steps.use.outputs.INSTANCE_ID }}
+
     steps:
       - name: Checkout initial repo
         uses: actions/checkout@v4
@@ -72,24 +75,59 @@ jobs:
           AMI=$(aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id --query "Parameter.Value" --output text)
           echo "AMI_ID=$AMI" >> $GITHUB_OUTPUT
 
-      - name: Launch EC2 instance
+      - name: Check for existing EC2 instance
+        id: find
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=myapi" "Name=instance-state-name,Values=running,stopped" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text 2>/dev/null || true)
+
+          if [ "$INSTANCE_ID" = "None" ] || [ -z "$INSTANCE_ID" ]; then
+            echo "FOUND=false" >> $GITHUB_OUTPUT
+          else
+            echo "FOUND=true" >> $GITHUB_OUTPUT
+            echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Start existing EC2 instance if needed
+        if: steps.find.outputs.FOUND == 'true'
+        run: |
+          STATE=$(aws ec2 describe-instances --instance-ids ${{ steps.find.outputs.INSTANCE_ID }} \
+            --query "Reservations[0].Instances[0].State.Name" --output text)
+
+          if [ "$STATE" = "stopped" ]; then
+            echo "Starting EC2 instance..."
+            aws ec2 start-instances --instance-ids ${{ steps.find.outputs.INSTANCE_ID }}
+            aws ec2 wait instance-running --instance-ids ${{ steps.find.outputs.INSTANCE_ID }}
+          fi
+
+      - name: Launch new EC2 if none found
         id: ec2
+        if: steps.find.outputs.FOUND == 'false'
         run: |
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ${{ steps.ami.outputs.AMI_ID }} \
             --instance-type ${{ env.INSTANCE_TYPE }} \
             --key-name ${{ env.SSH_KEY_NAME }} \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Project,Value=myapi}]' \
             --query "Instances[0].InstanceId" --output text)
+
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
 
-      - name: Wait for EC2 running
-        run: aws ec2 wait instance-running --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }}
+      - name: Determine instance id to use
+        id: use
+        run: |
+          if [ "${{ steps.find.outputs.FOUND }}" = "true" ]; then
+            echo "INSTANCE_ID=${{ steps.find.outputs.INSTANCE_ID }}" >> $GITHUB_OUTPUT
+          else
+            echo "INSTANCE_ID=${{ steps.ec2.outputs.INSTANCE_ID }}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Get Public IP
         id: ip
         run: |
           PUBLIC_IP=$(aws ec2 describe-instances \
-            --instance-id ${{ steps.ec2.outputs.INSTANCE_ID }} \
+            --instance-id ${{ steps.use.outputs.INSTANCE_ID }} \
             --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
           echo "EC2_HOST=$PUBLIC_IP" >> $GITHUB_OUTPUT
 
