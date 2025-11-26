@@ -4,21 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       environment:
+        description: "Select environment"
         type: choice
-        description: Select environment
         options:
           - dev
           - qa
           - prod
       deploy_branch:
+        description: "Branch to deploy"
         type: string
-        required: true
         default: "main"
-        description: Branch to deploy
+        required: true
       deploy_backend:
+        description: "Deploy backend?"
         type: boolean
         default: true
-        description: Deploy backend?
 
 jobs:
   deploy:
@@ -31,26 +31,26 @@ jobs:
       APP_DLL_NAME: "AuthAPIwithController.dll"
 
     steps:
-      - name: Check out branch
+      - name: Check out code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.deploy_branch }}
 
-      - name: Setup .NET
+      - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Restore
+      - name: Restore dependencies
         run: dotnet restore
 
-      - name: Build
+      - name: Build project
         run: dotnet build --configuration Release --no-restore
 
-      - name: Publish
+      - name: Publish project
         run: dotnet publish -c Release -o out
 
-      - name: Resolve environment
+      - name: Resolve environment settings
         id: envs
         run: |
           if [ "${{ github.event.inputs.environment }}" = "dev" ]; then
@@ -67,7 +67,7 @@ jobs:
             echo "ENV_NAME=Production" >> $GITHUB_OUTPUT
           fi
 
-      - name: Install API folder on EC2
+      - name: Create folder and install runtime if needed
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.envs.outputs.EC2_HOST }}
@@ -89,10 +89,20 @@ jobs:
           host: ${{ steps.envs.outputs.EC2_HOST }}
           username: ${{ steps.envs.outputs.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: "systemd/myapi.service"
-          target: "/etc/systemd/system/"
+          source: "./systemd/myapi.service"
+          target: "/tmp/"
 
-      - name: upload build output
+      - name: Move and activate service file
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo mv /tmp/myapi.service /etc/systemd/system/
+            sudo systemctl daemon-reload
+
+      - name: Upload build output
         if: ${{ github.event.inputs.deploy_backend }}
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -102,14 +112,13 @@ jobs:
           source: "out/*"
           target: "${{ env.SERVICE_DIR }}"
 
-      - name: restart service
+      - name: Restart service
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.envs.outputs.EC2_HOST }}
           username: ${{ steps.envs.outputs.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            sudo systemctl daemon-reload
             sudo systemctl restart myapi
             sudo systemctl enable myapi
             sudo systemctl status myapi --no-pager
