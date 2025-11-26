@@ -73,7 +73,6 @@ jobs:
         run: |
           AMI=$(aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id --query "Parameter.Value" --output text)
           echo "AMI_ID=$AMI" >> $GITHUB_OUTPUT
-          echo "Using AMI: $AMI"
 
       - name: Create EC2 keypair
         run: |
