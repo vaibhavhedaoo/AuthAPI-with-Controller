@@ -1,146 +1,89 @@
-﻿name: Deploy API to EC2
+﻿name: Provision EC2 and Deploy API
 
 on:
   workflow_dispatch:
     inputs:
-      environment:
-        description: "Select environment"
-        required: true
-        type: choice
-        options:
-          - dev
-          - qa
-          - prod
-
       deploy_branch:
-        description: "Select branch to deploy (leave blank to use default branch)"
-        required: false
-        default: ""
+        description: "Branch to deploy"
+        default: "main"
         type: string
 
-      deploy_backend:
-        description: "Deploy backend?"
-        required: true
-        type: boolean
-        default: true
-
 jobs:
-  deploy:
+  provision-and-deploy:
     runs-on: ubuntu-latest
 
     env:
-      DOTNET_VERSION: "9.0"
-      SERVICE_NAME: "myapi"
-      SERVICE_DIR: "/var/www/myapi"
-      APP_DLL_NAME: "AuthAPIwithController.dll"
+      INSTANCE_NAME: "auto-api-server"
+      INSTANCE_TYPE: "t2.micro"
+      AMI_ID: "ami-0f58b397bc5c1f2e8" # Ubuntu 22.04 LTS ap-south-1
+      KEY_NAME: "api-key"
 
     steps:
-      # Determine which branch to use
-      - name: Initial Checkout to determine default branch
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ github.event.inputs.deploy_branch }}
 
-      - name: Determine branch to deploy
-        id: branch
-        run: |
-          if [ -z "${{ github.event.inputs.deploy_branch }}" ]; then
-            DEFAULT_BRANCH=$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')
-            echo "No branch selected, using default branch: $DEFAULT_BRANCH"
-            echo "BRANCH=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
-          else
-            echo "Branch selected: ${{ github.event.inputs.deploy_branch }}"
-            echo "BRANCH=${{ github.event.inputs.deploy_branch }}" >> $GITHUB_OUTPUT
-          fi
-
-      # Checkout selected branch
-      - name: Checkout deployment branch
-        uses: actions/checkout@v4
+      - name: Configure AWS CLI
+        uses: aws-actions/configure-aws-credentials@v2
         with:
-          ref: ${{ steps.branch.outputs.BRANCH }}
-          fetch-depth: 0
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+      - name: Create EC2 Key Pair if Not Exists
+        run: |
+          aws ec2 describe-key-pairs --key-name ${{ env.KEY_NAME }} || \
+          aws ec2 create-key-pair --key-name ${{ env.KEY_NAME }} --query 'KeyMaterial' --output text > key.pem
+          chmod 400 key.pem
+          echo "EC2_SSH_KEY<<EOF" >> $GITHUB_ENV
+          cat key.pem >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Launch EC2 Instance
+        id: ec2
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ${{ env.AMI_ID }} \
+            --count 1 \
+            --instance-type ${{ env.INSTANCE_TYPE }} \
+            --key-name ${{ env.KEY_NAME }} \
+            --query "Instances[0].InstanceId" \
+            --output text)
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "Launched instance: $INSTANCE_ID"
+
+      - name: Wait for EC2 to be running
+        run: |
+          aws ec2 wait instance-running --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }}
+          echo "EC2 is running"
+
+      - name: Get Public IP
+        id: ip
+        run: |
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-id ${{ steps.ec2.outputs.INSTANCE_ID }} \
+            --query "Reservations[0].Instances[0].PublicIpAddress" \
+            --output text)
+          echo "EC2_HOST=$PUBLIC_IP" >> $GITHUB_OUTPUT
+          echo "Public IP: $PUBLIC_IP"
+
+      - name: Update EC2_HOST GitHub Secret
+        uses: gliech/create-github-secret-action@v2
         with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+          name: EC2_HOST
+          value: ${{ steps.ip.outputs.EC2_HOST }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Restore dependencies
-        run: dotnet restore
-
-      - name: Build project
-        run: dotnet build --configuration Release --no-restore
-
-      - name: Publish project
-        run: dotnet publish -c Release -o out
-
-      # Simplified environment resolution using same secret for all environments
-      - name: Resolve EC2 Host & User values
-        id: envs
-        run: |
-          echo "EC2_HOST=${{ secrets.EC2_HOST }}" >> $GITHUB_OUTPUT
-          echo "EC2_USER=${{ secrets.EC2_USER }}" >> $GITHUB_OUTPUT
-          echo "ENV_NAME=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
-
-      # Debugging output
-      - name: Debug host and env values
-        run: |
-          echo "Host: ${{ steps.envs.outputs.EC2_HOST }}"
-          echo "User: ${{ steps.envs.outputs.EC2_USER }}"
-          echo "Environment: ${{ steps.envs.outputs.ENV_NAME }}"
-
-      - name: Create folder and install runtime if needed
+      - name: Install Dependencies & Deploy .NET API
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ steps.envs.outputs.EC2_HOST }}
-          username: ${{ steps.envs.outputs.EC2_USER }}
+          host: ${{ steps.ip.outputs.EC2_HOST }}
+          username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            sudo mkdir -p ${{ env.SERVICE_DIR }}
-            sudo chmod -R 755 ${{ env.SERVICE_DIR }}
-            if ! command -v dotnet >/dev/null; then
-              wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/pkg.deb
-              sudo dpkg -i /tmp/pkg.deb
-              sudo apt-get update -y
-              sudo apt-get install -y dotnet-runtime-9.0
-            fi
-
-      - name: Upload systemd service file
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ steps.envs.outputs.EC2_HOST }}
-          username: ${{ steps.envs.outputs.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "./systemd/myapi.service"
-          target: "/tmp/"
-
-      - name: Move and activate service file
-        uses: appleboy/ssh-action@v1.1.0
-        with:
-          host: ${{ steps.envs.outputs.EC2_HOST }}
-          username: ${{ steps.envs.outputs.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            sudo mv /tmp/myapi.service /etc/systemd/system/
-            sudo systemctl daemon-reload
-
-      - name: Upload build output
-        if: ${{ github.event.inputs.deploy_backend }}
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ steps.envs.outputs.EC2_HOST }}
-          username: ${{ steps.envs.outputs.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "out/*"
-          target: "${{ env.SERVICE_DIR }}"
-
-      - name: Restart service
-        uses: appleboy/ssh-action@v1.1.0
-        with:
-          host: ${{ steps.envs.outputs.EC2_HOST }}
-          username: ${{ steps.envs.outputs.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            sudo systemctl restart myapi
-            sudo systemctl enable myapi
-            sudo systemctl status myapi --no-pager
+            sudo apt update -y
+            sudo apt install -y dotnet-sdk-9.0 nginx
+            mkdir -p /var/www/myapi
+            sudo systemctl start nginx
+            echo "deployment ready"
