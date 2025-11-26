@@ -28,19 +28,17 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      INSTANCE_TYPE: "t2.micro"
+      INSTANCE_TYPE: "t3.micro"  # updated from t2.micro
       SSH_KEY_NAME: "auto-api-key"
       SERVICE_DIR: "/var/www/myapi"
       DOTNET_VERSION: "9.0"
 
     steps:
-      # Checkout initial repo to determine default branch
       - name: Checkout initial repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Determine which branch to deploy
       - name: Determine deployment branch
         id: branch
         run: |
@@ -53,14 +51,12 @@ jobs:
             echo "BRANCH=${{ github.event.inputs.deploy_branch }}" >> $GITHUB_OUTPUT
           fi
 
-      # Checkout final branch for build
       - name: Checkout deployment branch
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.branch.outputs.BRANCH }}
           fetch-depth: 0
 
-      # Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -68,7 +64,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Find latest ubuntu AMI
       - name: Resolve latest Ubuntu 22.04 AMI
         id: ami
         run: |
@@ -76,7 +71,6 @@ jobs:
           echo "AMI_ID=$AMI" >> $GITHUB_OUTPUT
           echo "Using AMI: $AMI"
 
-      # Create key pair if needed
       - name: Create EC2 keypair
         run: |
           if aws ec2 describe-key-pairs --key-name ${{ env.SSH_KEY_NAME }} >/dev/null 2>&1; then
@@ -89,11 +83,10 @@ jobs:
             echo "EOF" >> $GITHUB_ENV
           fi
 
-      # Launch EC2
       - name: Launch EC2 instance
         id: ec2
         run: |
-          INSTANCE_ID=$(aws ec2 run-instances \
+          INSTANCE_ID=$(aws ec2.run-instances \
             --image-id ${{ steps.ami.outputs.AMI_ID }} \
             --instance-type ${{ env.INSTANCE_TYPE }} \
             --key-name ${{ env.SSH_KEY_NAME }} \
@@ -101,13 +94,11 @@ jobs:
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "Launched EC2: $INSTANCE_ID"
 
-      # Wait EC2 ready
       - name: Wait for EC2 running
         run: |
           aws ec2 wait instance-running --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }}
           echo "EC2 is running"
 
-      # Get IP
       - name: Get Public IP
         id: ip
         run: |
@@ -118,7 +109,6 @@ jobs:
           echo "EC2_HOST=$PUBLIC_IP" >> $GITHUB_OUTPUT
           echo "Public IP: $PUBLIC_IP"
 
-      # Store IP into GitHub secret
       - name: Update EC2_HOST secret
         uses: actions/github-script@v7
         with:
@@ -143,7 +133,6 @@ jobs:
               key_id: publicKey.key_id,
             });
 
-      # Prepare EC2 and deploy API
       - name: Setup EC2 dependencies
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -156,11 +145,9 @@ jobs:
             sudo systemctl enable nginx --now
             sudo mkdir -p ${{ env.SERVICE_DIR }}
 
-      # Build API
       - name: Publish .NET API
         run: dotnet publish -c Release -o out
 
-      # Upload build to EC2
       - name: Upload build output
         if: ${{ github.event.inputs.deploy_backend }}
         uses: appleboy/scp-action@v0.1.7
