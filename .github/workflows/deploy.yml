@@ -5,16 +5,19 @@ on:
     inputs:
       environment:
         description: "Select environment"
+        required: true
         type: choice
         options:
           - dev
           - qa
           - prod
+
       deploy_branch:
-        description: "Branch to deploy"
+        description: "Select branch to deploy (leave blank to use default branch)"
+        required: false
+        default: ""
         type: string
-        default: "main"
-        required: true
+
       deploy_backend:
         description: "Deploy backend?"
         type: boolean
@@ -31,10 +34,31 @@ jobs:
       APP_DLL_NAME: "AuthAPIwithController.dll"
 
     steps:
-      - name: Check out code
+
+      # Checkout base repo to determine default branch
+      - name: Initial Checkout to determine default branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.deploy_branch }}
+          fetch-depth: 0
+
+      - name: Determine branch to deploy
+        id: branch
+        run: |
+          if [ -z "${{ github.event.inputs.deploy_branch }}" ]; then
+            DEFAULT_BRANCH=$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')
+            echo "No branch selected. Using default branch: $DEFAULT_BRANCH"
+            echo "BRANCH=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
+          else
+            echo "Branch selected: ${{ github.event.inputs.deploy_branch }}"
+            echo "BRANCH=${{ github.event.inputs.deploy_branch }}" >> $GITHUB_OUTPUT
+          fi
+
+      # Checkout final branch for deployment
+      - name: Checkout deployment branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch.outputs.BRANCH }}
+          fetch-depth: 0
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
