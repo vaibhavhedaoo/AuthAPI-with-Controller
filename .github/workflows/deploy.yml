@@ -73,7 +73,6 @@ jobs:
         run: |
           AMI=$(aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id --query "Parameter.Value" --output text)
           echo "AMI_ID=$AMI" >> $GITHUB_OUTPUT
-          echo "Using AMI: $AMI"
 
       - name: Create EC2 keypair
         run: |
@@ -96,7 +95,6 @@ jobs:
             --key-name ${{ env.SSH_KEY_NAME }} \
             --query "Instances[0].InstanceId" --output text)
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "Launched EC2: $INSTANCE_ID"
 
       - name: Wait for EC2 running
         run: |
@@ -120,7 +118,7 @@ jobs:
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
           username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
+          key: ${{ env.EC2_SSH_KEY }}
           script: |
             sudo apt update -y
             sudo apt install -y dotnet-sdk-9.0 nginx
@@ -136,7 +134,7 @@ jobs:
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
           username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
+          key: ${{ env.EC2_SSH_KEY }}
           source: "out/*"
           target: "${{ env.SERVICE_DIR }}"
 
