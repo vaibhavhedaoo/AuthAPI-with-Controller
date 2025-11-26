@@ -148,6 +148,8 @@ jobs:
             sudo apt install -y dotnet-sdk-9.0 nginx
             sudo systemctl enable nginx --now
             sudo mkdir -p ${{ env.SERVICE_DIR }}
+            sudo chown -R ubuntu:ubuntu ${{ env.SERVICE_DIR }}
+            sudo chmod -R 775 ${{ env.SERVICE_DIR }}
 
       - name: Publish .NET API
         run: dotnet publish -c Release -o out
