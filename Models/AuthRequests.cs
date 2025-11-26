@@ -1,8 +1,12 @@
-﻿public class RegisterRequest
+﻿using Microsoft.AspNetCore.Mvc;
+
+public class RegisterRequest
 {
     public string UserName { get; set; } = null!;
     public string Email { get; set; } = null!;
     public string Password { get; set; } = null!;
+    [HiddenInput]
+    public string Role { get; set; }
 }
 
 public class LoginRequest

@@ -1,0 +1,124 @@
+﻿name: Deploy API to EC2
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Select environment"
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      deploy_branch:
+        description: "Branch to deploy"
+        type: string
+        default: "main"
+        required: true
+      deploy_backend:
+        description: "Deploy backend?"
+        type: boolean
+        default: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      DOTNET_VERSION: "9.0"
+      SERVICE_NAME: "myapi"
+      SERVICE_DIR: "/var/www/myapi"
+      APP_DLL_NAME: "AuthAPIwithController.dll"
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.deploy_branch }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build project
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Publish project
+        run: dotnet publish -c Release -o out
+
+      - name: Resolve environment settings
+        id: envs
+        run: |
+          if [ "${{ github.event.inputs.environment }}" = "dev" ]; then
+            echo "EC2_HOST=${{ secrets.EC2_DEV_HOST }}" >> $GITHUB_OUTPUT
+            echo "EC2_USER=${{ secrets.EC2_DEV_USER }}" >> $GITHUB_OUTPUT
+            echo "ENV_NAME=Development" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.inputs.environment }}" = "qa" ]; then
+            echo "EC2_HOST=${{ secrets.EC2_QA_HOST }}" >> $GITHUB_OUTPUT
+            echo "EC2_USER=${{ secrets.EC2_QA_USER }}" >> $GITHUB_OUTPUT
+            echo "ENV_NAME=Staging" >> $GITHUB_OUTPUT
+          else
+            echo "EC2_HOST=${{ secrets.EC2_PROD_HOST }}" >> $GITHUB_OUTPUT
+            echo "EC2_USER=${{ secrets.EC2_PROD_USER }}" >> $GITHUB_OUTPUT
+            echo "ENV_NAME=Production" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create folder and install runtime if needed
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo mkdir -p ${{ env.SERVICE_DIR }}
+            sudo chmod -R 755 ${{ env.SERVICE_DIR }}
+            if ! command -v dotnet >/dev/null; then
+              wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O /tmp/pkg.deb
+              sudo dpkg -i /tmp/pkg.deb
+              sudo apt-get update -y
+              sudo apt-get install -y dotnet-runtime-9.0
+            fi
+
+      - name: Upload systemd service file
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "./systemd/myapi.service"
+          target: "/tmp/"
+
+      - name: Move and activate service file
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo mv /tmp/myapi.service /etc/systemd/system/
+            sudo systemctl daemon-reload
+
+      - name: Upload build output
+        if: ${{ github.event.inputs.deploy_backend }}
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "out/*"
+          target: "${{ env.SERVICE_DIR }}"
+
+      - name: Restart service
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.envs.outputs.EC2_HOST }}
+          username: ${{ steps.envs.outputs.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo systemctl restart myapi
+            sudo systemctl enable myapi
+            sudo systemctl status myapi --no-pager
