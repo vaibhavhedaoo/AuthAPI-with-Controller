@@ -94,7 +94,6 @@ jobs:
           STATE=$(aws ec2 describe-instances --instance-ids ${{ steps.find.outputs.INSTANCE_ID }} \
             --query "Reservations[0].Instances[0].State.Name" --output text)
           if [ "$STATE" = "stopped" ]; then
-            echo "Starting EC2 instance..."
             aws ec2 start-instances --instance-ids ${{ steps.find.outputs.INSTANCE_ID }}
             aws ec2 wait instance-running --instance-ids ${{ steps.find.outputs.INSTANCE_ID }}
           fi
@@ -134,7 +133,7 @@ jobs:
       - name: Wait for instance status checks
         run: aws ec2 wait instance-status-ok --instance-ids ${{ steps.use.outputs.INSTANCE_ID }}
 
-      - name: Setup EC2 dependencies and systemd service
+      - name: Setup EC2 dependencies
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
@@ -143,19 +142,18 @@ jobs:
           script: |
             sudo apt update -y
             sudo apt install -y dotnet-sdk-9.0 nginx
+            sudo ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet || true
             sudo systemctl enable nginx --now
             sudo mkdir -p /var/www/myapi
             sudo chown -R ubuntu:ubuntu /var/www/myapi
             sudo chmod -R 775 /var/www/myapi
-
             sudo tee /etc/systemd/system/myapi.service > /dev/null << 'EOF'
             [Unit]
             Description=My API Service
             After=network.target
-
             [Service]
             WorkingDirectory=/var/www/myapi
-            ExecStart=/usr/bin/dotnet /var/www/myapi/AuthAPIwithController.dll --urls "http://0.0.0.0:5000"
+            ExecStart=/usr/share/dotnet/dotnet /var/www/myapi/AuthAPIwithController.dll --urls http://0.0.0.0:5000
             Restart=always
             RestartSec=10
             KillSignal=SIGINT
@@ -163,14 +161,14 @@ jobs:
             User=ubuntu
             Environment=ASPNETCORE_ENVIRONMENT=Production
             Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
-
+            Environment=ASPNETCORE_URLS=http://0.0.0.0:5000
             [Install]
             WantedBy=multi-user.target
             EOF
-
             sudo systemctl daemon-reload
             sudo systemctl enable myapi
-            sudo systemctl restart myapi || true
+            sudo systemctl restart myapi
+            sudo systemctl status myapi --no-pager || true
 
       - name: Publish .NET API
         run: dotnet publish -c Release -o out
@@ -184,22 +182,6 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           source: "out/*"
           target: "${{ env.SERVICE_DIR }}"
-
-      # ================= DEBUG LOGS PRESERVED ==================
-      - name: Debug systemd logs & listening ports
-        uses: appleboy/ssh-action@v1.1.0
-        with:
-          host: ${{ steps.ip.outputs.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            echo "==== SYSTEMCTL STATUS ===="
-            sudo systemctl status myapi --no-pager
-            echo "==== JOURNALCTL LOGS ===="
-            sudo journalctl -u myapi --no-pager -n 100
-            echo "==== LISTENING PORTS ===="
-            sudo lsof -i -P -n | grep LISTEN
-      # =========================================================
 
       - name: Finished
         run: echo "Deployment completed successfully 🎉"
