@@ -48,10 +48,8 @@ jobs:
         run: |
           if [ -z "${{ github.event.inputs.deploy_branch }}" ]; then
             DEFAULT_BRANCH=$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')
-            echo "No branch provided, using default: $DEFAULT_BRANCH"
             echo "BRANCH=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
           else
-            echo "Using provided branch: ${{ github.event.inputs.deploy_branch }}"
             echo "BRANCH=${{ github.event.inputs.deploy_branch }}" >> $GITHUB_OUTPUT
           fi
 
@@ -77,13 +75,13 @@ jobs:
       - name: Create EC2 keypair
         run: |
           if aws ec2 describe-key-pairs --key-name ${{ env.SSH_KEY_NAME }} >/dev/null 2>&1; then
-            echo "Key pair exists."
+            echo "Key exists"
           else
             aws ec2 create-key-pair --key-name ${{ env.SSH_KEY_NAME }} --query "KeyMaterial" --output text > private.pem
             chmod 400 private.pem
-            echo "EC2_SSH_KEY<<EOF" >> $GITHUB_ENV
+            echo 'EC2_SSH_KEY<<EOF' >> $GITHUB_ENV
             cat private.pem >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
+            echo 'EOF' >> $GITHUB_ENV
           fi
 
       - name: Launch EC2 instance
@@ -97,24 +95,23 @@ jobs:
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
 
       - name: Wait for EC2 running
-        run: |
-          aws ec2 wait instance-running --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }}
+        run: aws ec2 wait instance-running --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }}
 
       - name: Get Public IP
         id: ip
         run: |
           PUBLIC_IP=$(aws ec2 describe-instances \
             --instance-id ${{ steps.ec2.outputs.INSTANCE_ID }} \
-            --query "Reservations[0].Instances[0].PublicIpAddress" \
-            --output text)
+            --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
           echo "EC2_HOST=$PUBLIC_IP" >> $GITHUB_OUTPUT
-          echo "Public IP: $PUBLIC_IP"
 
       - name: Output EC2 Host
         run: echo "EC2 Host is ${{ steps.ip.outputs.EC2_HOST }}"
 
       - name: Setup EC2 dependencies
         uses: appleboy/ssh-action@v1.1.0
+        env:
+          EC2_SSH_KEY: ${{ env.EC2_SSH_KEY }}
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
           username: ubuntu
@@ -122,7 +119,6 @@ jobs:
           script: |
             sudo apt update -y
             sudo apt install -y dotnet-sdk-9.0 nginx
-            sudo systemctl enable nginx --now
             sudo mkdir -p ${{ env.SERVICE_DIR }}
 
       - name: Publish .NET API
@@ -131,6 +127,8 @@ jobs:
       - name: Upload build output
         if: ${{ github.event.inputs.deploy_backend }}
         uses: appleboy/scp-action@v0.1.7
+        env:
+          EC2_SSH_KEY: ${{ env.EC2_SSH_KEY }}
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
           username: ubuntu
