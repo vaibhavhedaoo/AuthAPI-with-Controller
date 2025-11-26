@@ -1,5 +1,10 @@
 ﻿name: Provision EC2 and Deploy API
 
+permissions:
+  actions: write
+  contents: write
+  secrets: write
+
 on:
   workflow_dispatch:
     inputs:
