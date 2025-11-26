@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       deploy_branch:
-        description: "Branch to deploy"
-        default: "main"
+        description: "Branch to deploy (leave blank to use default)"
         required: false
+        default: ""
         type: string
+
       environment:
-        description: "Environment"
+        description: "Deployment environment"
         type: choice
         options:
           - dev
@@ -17,36 +18,69 @@ on:
           - prod
         default: dev
 
+      deploy_backend:
+        description: "Deploy backend?"
+        type: boolean
+        default: true
+
 jobs:
   provision-and-deploy:
     runs-on: ubuntu-latest
 
     env:
       INSTANCE_TYPE: "t2.micro"
-      AMI_ID: "ami-0f58b397bc5c1f2e8" # Ubuntu 22.04 LTS for ap-south-1
       SSH_KEY_NAME: "auto-api-key"
       SERVICE_DIR: "/var/www/myapi"
+      DOTNET_VERSION: "9.0"
 
     steps:
-      - name: Checkout Repository
+      # Checkout initial repo to determine default branch
+      - name: Checkout initial repo
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.deploy_branch }}
           fetch-depth: 0
 
-      # Configure AWS CLI
-      - name: Configure AWS Credentials
+      # Determine which branch to deploy
+      - name: Determine deployment branch
+        id: branch
+        run: |
+          if [ -z "${{ github.event.inputs.deploy_branch }}" ]; then
+            DEFAULT_BRANCH=$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')
+            echo "No branch provided, using default: $DEFAULT_BRANCH"
+            echo "BRANCH=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
+          else
+            echo "Using provided branch: ${{ github.event.inputs.deploy_branch }}"
+            echo "BRANCH=${{ github.event.inputs.deploy_branch }}" >> $GITHUB_OUTPUT
+          fi
+
+      # Checkout final branch for build
+      - name: Checkout deployment branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch.outputs.BRANCH }}
+          fetch-depth: 0
+
+      # Configure AWS credentials
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Create Key Pair if not exists
+      # Find latest ubuntu AMI
+      - name: Resolve latest Ubuntu 22.04 AMI
+        id: ami
+        run: |
+          AMI=$(aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id --query "Parameter.Value" --output text)
+          echo "AMI_ID=$AMI" >> $GITHUB_OUTPUT
+          echo "Using AMI: $AMI"
+
+      # Create key pair if needed
       - name: Create EC2 keypair
         run: |
           if aws ec2 describe-key-pairs --key-name ${{ env.SSH_KEY_NAME }} >/dev/null 2>&1; then
-            echo "Key pair exists"
+            echo "Key pair exists."
           else
             aws ec2 create-key-pair --key-name ${{ env.SSH_KEY_NAME }} --query "KeyMaterial" --output text > private.pem
             chmod 400 private.pem
@@ -55,34 +89,37 @@ jobs:
             echo "EOF" >> $GITHUB_ENV
           fi
 
-      # Create EC2 instance
-      - name: Launch EC2 Instance
+      # Launch EC2
+      - name: Launch EC2 instance
         id: ec2
         run: |
           INSTANCE_ID=$(aws ec2 run-instances \
-            --image-id ${{ env.AMI_ID }} \
+            --image-id ${{ steps.ami.outputs.AMI_ID }} \
             --instance-type ${{ env.INSTANCE_TYPE }} \
             --key-name ${{ env.SSH_KEY_NAME }} \
             --query "Instances[0].InstanceId" --output text)
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "Launched instance: $INSTANCE_ID"
+          echo "Launched EC2: $INSTANCE_ID"
 
-      - name: Wait until EC2 running
+      # Wait EC2 ready
+      - name: Wait for EC2 running
         run: |
           aws ec2 wait instance-running --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }}
+          echo "EC2 is running"
 
-      - name: Retrieve EC2 Public IP
+      # Get IP
+      - name: Get Public IP
         id: ip
         run: |
           PUBLIC_IP=$(aws ec2 describe-instances \
-            --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }} \
+            --instance-id ${{ steps.ec2.outputs.INSTANCE_ID }} \
             --query "Reservations[0].Instances[0].PublicIpAddress" \
             --output text)
           echo "EC2_HOST=$PUBLIC_IP" >> $GITHUB_OUTPUT
           echo "Public IP: $PUBLIC_IP"
 
-      # Save EC2 IP into GitHub Secret
-      - name: Update EC2_HOST Secret
+      # Store IP into GitHub secret
+      - name: Update EC2_HOST secret
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -93,21 +130,21 @@ jobs:
             });
 
             const sodium = require("tweetsodium");
-            const ip = "${{ steps.ip.outputs.EC2_HOST }}";
+            const value = "${{ steps.ip.outputs.EC2_HOST }}";
             const keyBytes = Buffer.from(publicKey.key, "base64");
-            const encryptedBytes = sodium.seal(Buffer.from(ip), keyBytes);
-            const encryptedValue = Buffer.from(encryptedBytes).toString("base64");
+            const encryptedBytes = sodium.seal(Buffer.from(value), keyBytes);
+            const encrypted = Buffer.from(encryptedBytes).toString("base64");
 
             await github.actions.createOrUpdateRepoSecret({
               owner: context.repo.owner,
               repo: context.repo.repo,
               secret_name: "EC2_HOST",
-              encrypted_value: encryptedValue,
+              encrypted_value: encrypted,
               key_id: publicKey.key_id,
             });
 
-      # Deploy to EC2
-      - name: Deploy Application
+      # Prepare EC2 and deploy API
+      - name: Setup EC2 dependencies
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
@@ -115,17 +152,17 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             sudo apt update -y
-            sudo apt install -y dotnet-runtime-9.0 nginx
+            sudo apt install -y dotnet-sdk-9.0 nginx
             sudo systemctl enable nginx --now
             sudo mkdir -p ${{ env.SERVICE_DIR }}
-            sudo chmod -R 755 ${{ env.SERVICE_DIR }}
-            echo "EC2 ready for API deployment"
 
-      # Build .NET and upload
+      # Build API
       - name: Publish .NET API
         run: dotnet publish -c Release -o out
 
+      # Upload build to EC2
       - name: Upload build output
+        if: ${{ github.event.inputs.deploy_backend }}
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
@@ -134,11 +171,5 @@ jobs:
           source: "out/*"
           target: "${{ env.SERVICE_DIR }}"
 
-      - name: Restart placeholder (setup systemd later)
-        uses: appleboy/ssh-action@v1.1.0
-        with:
-          host: ${{ steps.ip.outputs.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            echo "Deployment completed successfully 🎉"
+      - name: Finished
+        run: echo "Deployment completed successfully 🎉"
