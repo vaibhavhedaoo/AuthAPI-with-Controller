@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      INSTANCE_TYPE: "t3.micro"  # updated from t2.micro
+      INSTANCE_TYPE: "t3.micro"
       SSH_KEY_NAME: "auto-api-key"
       SERVICE_DIR: "/var/www/myapi"
       DOTNET_VERSION: "9.0"
@@ -86,7 +86,7 @@ jobs:
       - name: Launch EC2 instance
         id: ec2
         run: |
-          INSTANCE_ID=$(aws ec2.run-instances \
+          INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ${{ steps.ami.outputs.AMI_ID }} \
             --instance-type ${{ env.INSTANCE_TYPE }} \
             --key-name ${{ env.SSH_KEY_NAME }} \
