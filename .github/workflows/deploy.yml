@@ -6,76 +6,108 @@ on:
       deploy_branch:
         description: "Branch to deploy"
         default: "main"
+        required: false
         type: string
+      environment:
+        description: "Environment"
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+        default: dev
 
 jobs:
   provision-and-deploy:
     runs-on: ubuntu-latest
 
     env:
-      INSTANCE_NAME: "auto-api-server"
       INSTANCE_TYPE: "t2.micro"
-      AMI_ID: "ami-0f58b397bc5c1f2e8" # Ubuntu 22.04 LTS ap-south-1
-      KEY_NAME: "api-key"
+      AMI_ID: "ami-0f58b397bc5c1f2e8" # Ubuntu 22.04 LTS for ap-south-1
+      SSH_KEY_NAME: "auto-api-key"
+      SERVICE_DIR: "/var/www/myapi"
 
     steps:
-      - name: Checkout code
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.deploy_branch }}
+          fetch-depth: 0
 
-      - name: Configure AWS CLI
+      # Configure AWS CLI
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Create EC2 Key Pair if Not Exists
+      # Create Key Pair if not exists
+      - name: Create EC2 keypair
         run: |
-          aws ec2 describe-key-pairs --key-name ${{ env.KEY_NAME }} || \
-          aws ec2 create-key-pair --key-name ${{ env.KEY_NAME }} --query 'KeyMaterial' --output text > key.pem
-          chmod 400 key.pem
-          echo "EC2_SSH_KEY<<EOF" >> $GITHUB_ENV
-          cat key.pem >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          if aws ec2 describe-key-pairs --key-name ${{ env.SSH_KEY_NAME }} >/dev/null 2>&1; then
+            echo "Key pair exists"
+          else
+            aws ec2 create-key-pair --key-name ${{ env.SSH_KEY_NAME }} --query "KeyMaterial" --output text > private.pem
+            chmod 400 private.pem
+            echo "EC2_SSH_KEY<<EOF" >> $GITHUB_ENV
+            cat private.pem >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          fi
 
+      # Create EC2 instance
       - name: Launch EC2 Instance
         id: ec2
         run: |
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ${{ env.AMI_ID }} \
-            --count 1 \
             --instance-type ${{ env.INSTANCE_TYPE }} \
-            --key-name ${{ env.KEY_NAME }} \
-            --query "Instances[0].InstanceId" \
-            --output text)
+            --key-name ${{ env.SSH_KEY_NAME }} \
+            --query "Instances[0].InstanceId" --output text)
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "Launched instance: $INSTANCE_ID"
 
-      - name: Wait for EC2 to be running
+      - name: Wait until EC2 running
         run: |
           aws ec2 wait instance-running --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }}
-          echo "EC2 is running"
 
-      - name: Get Public IP
+      - name: Retrieve EC2 Public IP
         id: ip
         run: |
           PUBLIC_IP=$(aws ec2 describe-instances \
-            --instance-id ${{ steps.ec2.outputs.INSTANCE_ID }} \
+            --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }} \
             --query "Reservations[0].Instances[0].PublicIpAddress" \
             --output text)
           echo "EC2_HOST=$PUBLIC_IP" >> $GITHUB_OUTPUT
           echo "Public IP: $PUBLIC_IP"
 
-      - name: Update EC2_HOST GitHub Secret
-        uses: gliech/create-github-secret-action@v2
+      # Save EC2 IP into GitHub Secret
+      - name: Update EC2_HOST Secret
+        uses: actions/github-script@v7
         with:
-          name: EC2_HOST
-          value: ${{ steps.ip.outputs.EC2_HOST }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: publicKey } = await github.actions.getRepoPublicKey({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
 
-      - name: Install Dependencies & Deploy .NET API
+            const sodium = require("tweetsodium");
+            const ip = "${{ steps.ip.outputs.EC2_HOST }}";
+            const keyBytes = Buffer.from(publicKey.key, "base64");
+            const encryptedBytes = sodium.seal(Buffer.from(ip), keyBytes);
+            const encryptedValue = Buffer.from(encryptedBytes).toString("base64");
+
+            await github.actions.createOrUpdateRepoSecret({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              secret_name: "EC2_HOST",
+              encrypted_value: encryptedValue,
+              key_id: publicKey.key_id,
+            });
+
+      # Deploy to EC2
+      - name: Deploy Application
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.ip.outputs.EC2_HOST }}
@@ -83,7 +115,30 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             sudo apt update -y
-            sudo apt install -y dotnet-sdk-9.0 nginx
-            mkdir -p /var/www/myapi
-            sudo systemctl start nginx
-            echo "deployment ready"
+            sudo apt install -y dotnet-runtime-9.0 nginx
+            sudo systemctl enable nginx --now
+            sudo mkdir -p ${{ env.SERVICE_DIR }}
+            sudo chmod -R 755 ${{ env.SERVICE_DIR }}
+            echo "EC2 ready for API deployment"
+
+      # Build .NET and upload
+      - name: Publish .NET API
+        run: dotnet publish -c Release -o out
+
+      - name: Upload build output
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.ip.outputs.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "out/*"
+          target: "${{ env.SERVICE_DIR }}"
+
+      - name: Restart placeholder (setup systemd later)
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.ip.outputs.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "Deployment completed successfully 🎉"
