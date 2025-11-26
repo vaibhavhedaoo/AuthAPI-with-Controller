@@ -1,9 +1,8 @@
 ﻿name: Provision EC2 and Deploy API
 
 permissions:
-  actions: write
   contents: write
-  secrets: write
+  actions: write
 
 on:
   workflow_dispatch:
@@ -102,7 +101,6 @@ jobs:
       - name: Wait for EC2 running
         run: |
           aws ec2 wait instance-running --instance-ids ${{ steps.ec2.outputs.INSTANCE_ID }}
-          echo "EC2 is running"
 
       - name: Get Public IP
         id: ip
@@ -112,12 +110,11 @@ jobs:
             --query "Reservations[0].Instances[0].PublicIpAddress" \
             --output text)
           echo "EC2_HOST=$PUBLIC_IP" >> $GITHUB_OUTPUT
-          echo "Public IP: $PUBLIC_IP"
 
-      - name: Update EC2_HOST secret
+      - name: Update EC2_HOST secret using PAT
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.PAT_TOKEN }}
           script: |
             const { data: publicKey } = await github.rest.actions.getRepoPublicKey({
               owner: context.repo.owner,
