@@ -114,7 +114,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const { data: publicKey } = await github.actions.getRepoPublicKey({
+            const { data: publicKey } = await github.rest.actions.getRepoPublicKey({
               owner: context.repo.owner,
               repo: context.repo.repo,
             });
@@ -123,13 +123,13 @@ jobs:
             const value = "${{ steps.ip.outputs.EC2_HOST }}";
             const keyBytes = Buffer.from(publicKey.key, "base64");
             const encryptedBytes = sodium.seal(Buffer.from(value), keyBytes);
-            const encrypted = Buffer.from(encryptedBytes).toString("base64");
+            const encryptedValue = Buffer.from(encryptedBytes).toString("base64");
 
-            await github.actions.createOrUpdateRepoSecret({
+            await github.rest.actions.createOrUpdateRepoSecret({
               owner: context.repo.owner,
               repo: context.repo.repo,
               secret_name: "EC2_HOST",
-              encrypted_value: encrypted,
+              encrypted_value: encryptedValue,
               key_id: publicKey.key_id,
             });
 
