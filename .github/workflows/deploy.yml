@@ -147,9 +147,35 @@ jobs:
             sudo apt update -y
             sudo apt install -y dotnet-sdk-9.0 nginx
             sudo systemctl enable nginx --now
-            sudo mkdir -p ${{ env.SERVICE_DIR }}
-            sudo chown -R ubuntu:ubuntu ${{ env.SERVICE_DIR }}
-            sudo chmod -R 775 ${{ env.SERVICE_DIR }}
+            sudo mkdir -p /var/www/myapi
+            sudo chown -R ubuntu:ubuntu /var/www/myapi
+            sudo chmod -R 775 /var/www/myapi
+
+            # create systemd service for the API
+            sudo tee /etc/systemd/system/myapi.service > /dev/null << 'EOF'
+            [Unit]
+            Description=My API Service
+            After=network.target
+
+            [Service]
+            WorkingDirectory=/var/www/myapi
+            ExecStart=/usr/bin/dotnet /var/www/myapi/AuthAPIwithController.dll
+            Restart=always
+            RestartSec=10
+            KillSignal=SIGINT
+            SyslogIdentifier=myapi-service
+            User=ubuntu
+            Environment=ASPNETCORE_ENVIRONMENT=Production
+            Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+
+            sudo systemctl daemon-reload
+            sudo systemctl enable myapi
+            sudo systemctl restart myapi
+            sudo systemctl status myapi --no-pager || true
 
       - name: Publish .NET API
         run: dotnet publish -c Release -o out
