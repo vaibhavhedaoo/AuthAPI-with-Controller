@@ -8,6 +8,9 @@ using System.Text;
 using AuthService.Data;
 using AuthAPIwithController.Models;
 using Microsoft.AspNetCore.Authorization;
+using Serilog;
+using AWS.Logger;
+using AWS.Logger.SeriLog;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -40,12 +43,26 @@ builder.WebHost.UseUrls($"http://*:{port}");
 var logFolder = "/var/app/current/logs";
 Directory.CreateDirectory(logFolder);
 
+//Log.Logger = new LoggerConfiguration()
+//    .MinimumLevel.Information()
+//    .WriteTo.Console()
+//    .WriteTo.File($"{logFolder}/app-log.txt", rollingInterval: RollingInterval.Day)
+//    .CreateLogger();
+var awsConfig = new AWSLoggerConfig
+{
+    LogGroup = "/ec2/myapi/app", // log group for application log
+    Region = "us-east-1"
+};
+
+
 Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Information()
+    .MinimumLevel.Debug()
+    .Enrich.FromLogContext()
+    .WriteTo.AWSSeriLog(awsConfig)
     .WriteTo.Console()
-    .WriteTo.File($"{logFolder}/app-log.txt", rollingInterval: RollingInterval.Day)
     .CreateLogger();
 
+builder.Logging.ClearProviders();
 builder.Host.UseSerilog();
 
 // ------------------------------------------------------------
